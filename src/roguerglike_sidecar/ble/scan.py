@@ -30,17 +30,23 @@ async def scan_for_service(
 
     Returns a name-sorted list of matches. Devices that did not advertise a
     local name show up as ``"(unnamed)"`` so the address is still selectable.
+
+    We deliberately scan **unfiltered** and post-filter in Python rather than
+    passing ``service_uuids=`` to Bleak. Bleak's adapter-level filter is
+    unreliable on Windows: devices that advertise their FTMS UUID in the
+    *scan response* (rather than the initial advertisement packet) are
+    silently dropped. KICKRs do exactly this. Post-filtering catches them.
     """
     from bleak import BleakScanner  # local import keeps unit tests Bleak-free
 
-    log.info("scanning for %s for %.1fs", service_uuid, timeout_s)
-    raw = await BleakScanner.discover(
-        timeout=timeout_s,
-        service_uuids=[service_uuid],
-        return_adv=True,
-    )
+    needle = service_uuid.lower()
+    log.info("scanning for %s for %.1fs", needle, timeout_s)
+    raw = await BleakScanner.discover(timeout=timeout_s, return_adv=True)
     out: list[DiscoveredDevice] = []
     for address, (device, adv) in raw.items():
+        advertised = {u.lower() for u in (adv.service_uuids or [])}
+        if needle not in advertised:
+            continue
         out.append(
             DiscoveredDevice(
                 address=address,
