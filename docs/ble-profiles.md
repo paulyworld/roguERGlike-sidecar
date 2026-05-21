@@ -55,16 +55,57 @@ Three pieces:
 | Profile | Module | Service | Characteristic | device_kind |
 |---|---|---|---|---|
 | FTMS Bike | `ble/ftms_bike.py` | `0x1826` Fitness Machine | `0x2AD2` Indoor Bike Data | `bike_trainer` |
+| HR Sensor | `ble/hrs.py` | `0x180D` Heart Rate Service | `0x2A37` Heart Rate Measurement | `hr_sensor` |
+
+### HR Sensor compatibility
+
+The HR Sensor profile is the **broad-ecosystem** path — any device that
+broadcasts as a BLE Heart Rate Sensor works without vendor-specific code.
+That covers (representative sample, not exhaustive):
+
+- **Out of the box:** Polar H10 / H9 / Verity Sense, Wahoo TICKR (all
+  variants), Garmin HRM-Pro / HRM-Dual, COROS HR Monitor, Suunto Smart
+  Sensor, most BLE-only chest straps from any vendor.
+- **With a companion app re-broadcasting:** Apple Watch (via apps like
+  HeartCast / BLE Heart Rate / HRV4Training), Wear OS smartwatches (similar
+  apps), Garmin watches in broadcast mode.
+- **In a specific mode:** Whoop 4.0+ and **Whoop MG5** (✓ confirmed
+  2026-05-21 — broadcasts as standard BLE HRS once "Broadcast Heart Rate"
+  is enabled in the Whoop app; the BLE device name is whatever the user
+  has set in the Whoop app, not necessarily containing "Whoop"). Older
+  Whoop generations (3.0 and earlier) are proprietary-only.
+- **Doesn't work via HRS (would need a vendor-specific profile, not in
+  scope):** Oura rings (no real-time BLE HR — syncs to its app over
+  proprietary services), ANT+-only devices.
+
+When pitching the feature, frame it as *"any device that broadcasts as a
+BLE Heart Rate Sensor"* — accurate, avoids vendor promises.
+
+### HR de-duplication policy
+
+Many FTMS bike trainers embed a heart rate field in their Indoor Bike Data
+packet (from a strap paired to the trainer's head unit, or in some cases
+from a wrist sensor on a fancier trainer). When the user also pairs a
+standalone HR sensor through the sidecar, two sources are publishing
+`heart_rate` events and the engine would see them interleaved.
+
+Policy: **the standalone HR sensor wins by default.** The bike's FTMS
+source is started with `drop_event_types={"heart_rate"}`, so its embedded
+HR is silently discarded while bike-specific events (power, cadence, speed)
+flow normally. The `--prefer-bike-hr` CLI flag inverts this — useful in the
+unusual case where the rider trusts the bike's HR pickup more than chest
+strap reception in their setup.
+
+Implementation lives in `_resolve_drop_types` in `cli.py` (small pure
+function, easy to unit-test). It returns the `(bike_drops, hr_drops)` pair
+based on which devices are paired and the prefer-bike-hr flag.
 
 ## Planned
 
-- **HR Sensor (HRS)** — service `0x180D`, characteristic `0x2A37` (Heart Rate
-  Measurement). Standalone chest straps. When a bike already emits HR inside
-  its FTMS packet, policy will be "prefer standalone HR sensor"; that
-  dedup belongs above the profile (probably in a small `HrPolicy` selector)
-  not inside either decoder.
 - **Cycling Speed and Cadence (CSCS)** — service `0x1816`. Some older smart
   trainers and power meters expose cadence here rather than via FTMS.
+- **Stride Sensor (RSC)** — service `0x1814`. Treadmill / footpod pace
+  + cadence. Out of scope until a treadmill game is in design.
 
 ## Design constraints
 

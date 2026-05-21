@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 
+import pytest
+
 from roguerglike_sidecar.ble.source import BleSource
 from roguerglike_sidecar.events import (
     CadenceData,
@@ -80,3 +82,37 @@ async def test_publish_connected_uses_profile_device_kind_and_given_name() -> No
     assert env.device_kind == "bike_trainer"
     assert env.data.kind == "bike_trainer"  # type: ignore[union-attr]
     assert env.data.name == "KICKR CORE 8B2A"  # type: ignore[union-attr]
+
+
+async def test_drop_event_types_suppresses_matching_events() -> None:
+    """When a bike that embeds HR is paired alongside a standalone HR sensor,
+    the bike source is configured with ``drop_event_types={"heart_rate"}`` so
+    the strap is the sole HR source on the wire. on_packet must skip the
+    drop-typed events and publish everything else."""
+    bus = EventBus()
+    source = BleSource(
+        _MultiEventProfile(),
+        "AA:BB:CC",
+        "DropTest",
+        bus,
+        drop_event_types=frozenset({"power"}),
+    )
+    async with bus.subscribe() as q:
+        await source.on_packet(b"\x00")
+        first = await asyncio.wait_for(q.get(), timeout=1.0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(q.get(), timeout=0.05)
+    # _MultiEventProfile yields ('power', ...) then ('cadence', ...); dropping
+    # 'power' leaves only the cadence event reaching the bus.
+    assert first.type == "cadence"
+
+
+async def test_drop_event_types_default_is_empty() -> None:
+    """No suppression unless explicitly configured."""
+    bus = EventBus()
+    source = BleSource(_MultiEventProfile(), "addr", "Default", bus)
+    async with bus.subscribe() as q:
+        await source.on_packet(b"\x00")
+        first = await asyncio.wait_for(q.get(), timeout=1.0)
+        second = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert (first.type, second.type) == ("power", "cadence")
