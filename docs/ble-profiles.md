@@ -69,8 +69,11 @@ That covers (representative sample, not exhaustive):
 - **With a companion app re-broadcasting:** Apple Watch (via apps like
   HeartCast / BLE Heart Rate / HRV4Training), Wear OS smartwatches (similar
   apps), Garmin watches in broadcast mode.
-- **In a specific mode:** Whoop 4.0+ (turn on "Broadcast HR" in the Whoop
-  app). Older Whoop is proprietary-only.
+- **In a specific mode:** Whoop 4.0+ and **Whoop MG5** (✓ confirmed
+  2026-05-21 — broadcasts as standard BLE HRS once "Broadcast Heart Rate"
+  is enabled in the Whoop app; the BLE device name is whatever the user
+  has set in the Whoop app, not necessarily containing "Whoop"). Older
+  Whoop generations (3.0 and earlier) are proprietary-only.
 - **Doesn't work via HRS (would need a vendor-specific profile, not in
   scope):** Oura rings (no real-time BLE HR — syncs to its app over
   proprietary services), ANT+-only devices.
