@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
 from roguerglike_sidecar.events import (
     CadenceData,
     DeviceConnectedData,

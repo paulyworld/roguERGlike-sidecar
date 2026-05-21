@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+
 from roguerglike_sidecar.events import (
     CadenceData,
     DeviceConnectedData,
