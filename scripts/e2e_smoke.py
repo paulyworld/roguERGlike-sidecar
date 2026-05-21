@@ -9,6 +9,7 @@ import json
 
 import aiohttp
 import websockets
+
 from roguerglike_sidecar.mock import MockState, run_mock_loop
 from roguerglike_sidecar.web_ui import run_web_ui
 from roguerglike_sidecar.ws_server import EventBus, run_ws_server

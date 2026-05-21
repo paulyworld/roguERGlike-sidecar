@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
 from roguerglike_sidecar.mock import MockState, run_mock_loop
 from roguerglike_sidecar.ws_server import EventBus
 

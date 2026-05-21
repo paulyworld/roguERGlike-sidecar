@@ -17,8 +17,8 @@ from .events import (
     DeviceKind,
     HeartRateData,
     PowerData,
-    SessionStartData,
 )
+from .session import announce_session_start
 from .ws_server import EventBus
 
 log = logging.getLogger(__name__)
@@ -55,12 +55,12 @@ class MockState:
 
 
 async def announce_device(bus: EventBus) -> None:
-    """One-shot at startup: session_start + device_connected."""
-    await bus.publish(
-        type_="session_start",
-        data=SessionStartData(session_id=bus.session_id),
-        device_kind=DEVICE_KIND,
-    )
+    """One-shot at startup: session_start + device_connected.
+
+    The session_start helper is shared with live mode (see ``session.py``);
+    device_connected is mock-specific (live mode emits it from BleSource).
+    """
+    await announce_session_start(bus, DEVICE_KIND)
     await bus.publish(
         type_="device_connected",
         data=DeviceConnectedData(kind=DEVICE_KIND, name=DEVICE_NAME),

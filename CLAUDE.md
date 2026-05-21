@@ -60,10 +60,13 @@ pre-commit install
 # Run in mock mode (no real device needed)
 roguerglike-sidecar --mode mock
 
-# Run against real devices
-roguerglike-sidecar --mode live
+# Scan for FTMS bike trainers in range and exit
+roguerglike-sidecar --scan
 
-# Replay a recorded session
+# Run against a real bike trainer (name substring or BLE address)
+roguerglike-sidecar --mode live --device-bike "KICKR"
+
+# Replay a recorded session  (NOT YET IMPLEMENTED — Phase 3)
 roguerglike-sidecar --mode replay --file rides/example.jsonl
 
 # Lint + test
