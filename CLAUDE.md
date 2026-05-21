@@ -60,11 +60,20 @@ pre-commit install
 # Run in mock mode (no real device needed)
 roguerglike-sidecar --mode mock
 
-# Scan for FTMS bike trainers in range and exit
+# Scan for all known BLE profiles (FTMS bike + HR sensor) in range and exit
 roguerglike-sidecar --scan
 
 # Run against a real bike trainer (name substring or BLE address)
 roguerglike-sidecar --mode live --device-bike "KICKR"
+
+# Run against a bike + chest strap (strap is the HR source of truth)
+roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "Polar"
+
+# Same, but use the bike's embedded HR instead of the strap
+roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "Polar" --prefer-bike-hr
+
+# HR-only run (no bike)
+roguerglike-sidecar --mode live --device-hr "TICKR"
 
 # Replay a recorded session  (NOT YET IMPLEMENTED — Phase 3)
 roguerglike-sidecar --mode replay --file rides/example.jsonl

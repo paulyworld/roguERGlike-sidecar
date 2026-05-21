@@ -17,7 +17,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ..events import DeviceConnectedData, DeviceDisconnectedData
+from ..events import DeviceConnectedData, DeviceDisconnectedData, EventType
 from ..ws_server import EventBus
 from .profile import BleProfile
 
@@ -38,11 +38,19 @@ class BleSource:
         address: str,
         name: str,
         bus: EventBus,
+        *,
+        drop_event_types: frozenset[EventType] = frozenset(),
     ) -> None:
+        """``drop_event_types`` suppresses publishing of specific event types
+        decoded from this source's packets. Used for HR de-duplication when a
+        chest strap and a bike that embeds HR are both paired: the bike's
+        source is configured with ``drop_event_types={"heart_rate"}`` so the
+        strap is the single source of truth on the wire."""
         self._profile = profile
         self._address = address
         self._name = name
         self._bus = bus
+        self._drop_event_types = drop_event_types
 
     async def on_packet(self, payload: bytes) -> None:
         """Decode one notification payload and publish each resulting event.
@@ -50,6 +58,8 @@ class BleSource:
         Public so tests can drive it without standing up a real BLE client.
         """
         for type_, data in self._profile.decode(payload):
+            if type_ in self._drop_event_types:
+                continue
             await self._bus.publish(
                 type_=type_,
                 data=data,
