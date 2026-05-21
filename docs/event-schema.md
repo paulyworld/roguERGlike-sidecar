@@ -132,3 +132,32 @@ Emitted by the sidecar at boundaries.
 ```json
 { "type": "device_connected", "data": { "kind": "bike_trainer", "name": "KICKR CORE 8B2A" } }
 ```
+
+### `device_capabilities`
+Emitted once per device shortly after `device_connected`, when the profile
+exposes a feature characteristic (FTMS reads `0x2ACC` for this). Flags are
+pure capability indicators — they describe what the device *can* be asked
+to do, not whether the host has asked or whether control is currently held.
+
+For FTMS bikes the flags map to the Bluetooth SIG *Target Setting Features*
+bitmap (upper 4 bytes of `0x2ACC`); profiles without a feature characteristic
+(e.g. HRS heart-rate sensors) simply don't emit this event.
+
+```json
+{
+  "type": "device_capabilities",
+  "data": {
+    "kind": "bike_trainer",
+    "name": "KICKR CORE 8B2A",
+    "target_power": true,
+    "target_resistance": false,
+    "target_inclination": false,
+    "target_heart_rate": false,
+    "indoor_bike_simulation": true
+  }
+}
+```
+
+Future trainer-control work (FTMS Control Point writes for ERG mode) is
+gated on `target_power`; SIM-mode control is gated on `indoor_bike_simulation`.
+Clients should treat unknown future flags as additive and not strict-validate.

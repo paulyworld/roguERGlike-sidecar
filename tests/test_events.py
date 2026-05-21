@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from roguerglike_sidecar.events import (
     CadenceData,
+    DeviceCapabilitiesData,
     DeviceConnectedData,
     Envelope,
     HeartRateData,
@@ -56,6 +57,35 @@ def test_power_rejects_out_of_range() -> None:
         PowerData(watts=-1)
     with pytest.raises(ValidationError):
         PowerData(watts=10_000)
+
+
+def test_device_capabilities_round_trip_with_target_power() -> None:
+    env = _envelope(
+        "device_capabilities",
+        DeviceCapabilitiesData(
+            kind="bike_trainer",
+            name="KICKR CORE 1003",
+            target_power=True,
+            indoor_bike_simulation=True,
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    payload = json.loads(env.to_wire())["data"]
+    assert payload["target_power"] is True
+    assert payload["indoor_bike_simulation"] is True
+    assert payload["target_resistance"] is False  # default for unset flags
+
+
+def test_device_capabilities_defaults_are_all_false() -> None:
+    """A device whose feature characteristic reports no targets supported
+    serializes with all flags False — the engine can use this to gate ERG UI."""
+    data = DeviceCapabilitiesData(kind="bike_trainer", name="Bare Trainer")
+    assert data.target_power is False
+    assert data.target_resistance is False
+    assert data.target_inclination is False
+    assert data.target_heart_rate is False
+    assert data.indoor_bike_simulation is False
 
 
 def test_envelope_rejects_extra_fields() -> None:

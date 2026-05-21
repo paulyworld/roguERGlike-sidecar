@@ -17,7 +17,12 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ..events import DeviceConnectedData, DeviceDisconnectedData, EventType
+from ..events import (
+    DeviceCapabilitiesData,
+    DeviceConnectedData,
+    DeviceDisconnectedData,
+    EventType,
+)
 from ..ws_server import EventBus
 from .profile import BleProfile
 
@@ -80,6 +85,38 @@ class BleSource:
             device_kind=self._profile.device_kind,
         )
 
+    async def _read_and_publish_capabilities(self, client: BleakClient) -> None:
+        """If the profile exposes a feature characteristic, read it once and
+        emit a ``device_capabilities`` event. Soft failure: log + continue, so
+        a device that advertises FTMS but rejects the feature read doesn't
+        kill the source. Most FTMS bikes return the feature char fine; some
+        cheaper trainers omit it."""
+        feature_uuid = getattr(self._profile, "feature_char_uuid", None)
+        if feature_uuid is None:
+            return
+        parse = getattr(self._profile, "parse_features", None)
+        if parse is None:
+            return
+        try:
+            payload = bytes(await client.read_gatt_char(feature_uuid))
+        except Exception:  # noqa: BLE001 — capabilities are best-effort
+            log.exception(
+                "BLE source %s: failed to read feature characteristic; "
+                "treating as no advertised capabilities",
+                self._profile.name,
+            )
+            return
+        caps = parse(payload)
+        await self._bus.publish(
+            type_="device_capabilities",
+            data=DeviceCapabilitiesData(
+                kind=self._profile.device_kind,
+                name=self._name,
+                **caps,
+            ),
+            device_kind=self._profile.device_kind,
+        )
+
     async def run(self) -> None:
         """Connect, subscribe, stay subscribed until cancelled or disconnected;
         reconnect with backoff on failure."""
@@ -97,6 +134,7 @@ class BleSource:
                 connected = True
                 log.info("BLE source %s connected to %s", self._profile.name, self._name)
                 await self._publish_connected()
+                await self._read_and_publish_capabilities(client)
                 await client.start_notify(self._profile.char_uuid, handler)
                 while client.is_connected:
                     await asyncio.sleep(1.0)

@@ -39,6 +39,44 @@ from ..events import (
 # full Bluetooth base UUID).
 FTMS_SERVICE_UUID = "00001826-0000-1000-8000-00805f9b34fb"
 INDOOR_BIKE_DATA_CHAR_UUID = "00002ad2-0000-1000-8000-00805f9b34fb"
+# Fitness Machine Feature characteristic — 8 bytes total. Lower 4 bytes are
+# the *sensor* feature bitmap (what the device measures); upper 4 bytes are
+# the *target setting* feature bitmap (what control opcodes the device
+# accepts on the Fitness Machine Control Point). Read once at connect.
+FITNESS_MACHINE_FEATURE_CHAR_UUID = "00002acc-0000-1000-8000-00805f9b34fb"
+
+# Target Setting Features bit positions (Bluetooth SIG FTMS v1.0 §4.3.2).
+# Each bit set in the upper 4 bytes means the named control is supported.
+_TS_BIT_POWER_TARGET = 1 << 3
+_TS_BIT_RESISTANCE_TARGET = 1 << 2
+_TS_BIT_INCLINATION_TARGET = 1 << 1
+_TS_BIT_HEART_RATE_TARGET = 1 << 4
+_TS_BIT_INDOOR_BIKE_SIM = 1 << 13
+
+
+def parse_target_setting_features(features_payload: bytes) -> dict[str, bool]:
+    """Decode the 8-byte FTMS Fitness Machine Feature characteristic into the
+    subset of target-setting flags our schema models.
+
+    Returns all-``False`` for short, empty, or malformed payloads — same
+    "total" stance as the data decoder. Unknown reserved bits are ignored.
+    """
+    out = {
+        "target_power": False,
+        "target_resistance": False,
+        "target_inclination": False,
+        "target_heart_rate": False,
+        "indoor_bike_simulation": False,
+    }
+    if len(features_payload) < 8:
+        return out
+    target_bits = struct.unpack_from("<I", features_payload, 4)[0]
+    out["target_power"] = bool(target_bits & _TS_BIT_POWER_TARGET)
+    out["target_resistance"] = bool(target_bits & _TS_BIT_RESISTANCE_TARGET)
+    out["target_inclination"] = bool(target_bits & _TS_BIT_INCLINATION_TARGET)
+    out["target_heart_rate"] = bool(target_bits & _TS_BIT_HEART_RATE_TARGET)
+    out["indoor_bike_simulation"] = bool(target_bits & _TS_BIT_INDOOR_BIKE_SIM)
+    return out
 
 
 class FtmsBikeProfile:
@@ -48,6 +86,15 @@ class FtmsBikeProfile:
     service_uuid: str = FTMS_SERVICE_UUID
     char_uuid: str = INDOOR_BIKE_DATA_CHAR_UUID
     device_kind: DeviceKind = "bike_trainer"
+    # Optional capability-discovery hook. Read by ``BleSource`` once at
+    # connect; ``parse_features`` interprets the bytes. Profiles without a
+    # feature characteristic leave this as ``None``.
+    feature_char_uuid: str | None = FITNESS_MACHINE_FEATURE_CHAR_UUID
+
+    def parse_features(self, payload: bytes) -> dict[str, bool]:
+        """Map the FTMS Feature characteristic to capability booleans the
+        schema's ``DeviceCapabilitiesData`` understands."""
+        return parse_target_setting_features(payload)
 
     def decode(self, payload: bytes) -> Iterable[tuple[EventType, EventData]]:
         if len(payload) < 2:
