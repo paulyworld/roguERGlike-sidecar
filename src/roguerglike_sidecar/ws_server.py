@@ -25,18 +25,30 @@ log = logging.getLogger(__name__)
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8421
 
+# Events that describe session-level state a client needs to interpret the live
+# stream. The bus remembers the most recent envelope of each type and replays
+# them to every new subscriber so a client that connects mid-session still
+# learns the session id and which device is attached. Per-tick telemetry
+# (power, cadence, heart_rate, ...) is deliberately NOT replayed.
+SESSION_STATE_TYPES: frozenset[EventType] = frozenset(
+    {"session_start", "device_connected", "device_disconnected"}
+)
+
 
 class EventBus:
     """In-process pub/sub used by the mock producer and the WS server.
 
-    Holds session_id + seq state. ``publish`` is the only writer; ``subscribe``
-    yields envelopes for each connected client.
+    Holds session_id + seq state and the latest envelope of each session-state
+    event type. ``publish`` is the only writer; ``subscribe`` yields a queue
+    that is prefilled with current session-state events in seq order before any
+    live events arrive.
     """
 
     def __init__(self) -> None:
         self.session_id: UUID = uuid4()
         self._seq = 0
         self._subscribers: set[asyncio.Queue[Envelope]] = set()
+        self._session_state: dict[EventType, Envelope] = {}
         self._lock = asyncio.Lock()
 
     async def publish(
@@ -46,18 +58,25 @@ class EventBus:
         data: EventData,
         device_kind: DeviceKind,
     ) -> Envelope:
+        # Take the lock for the full critical section: seq assignment, envelope
+        # construction, session-state update, AND the subscriber snapshot. This
+        # closes the race where a new subscriber could attach between state
+        # update and fan-out and receive both a replay AND the live event.
         async with self._lock:
             seq = self._seq
             self._seq += 1
-        env = Envelope(
-            type=type_,
-            ts=now_ts(),
-            session_id=self.session_id,
-            seq=seq,
-            device_kind=device_kind,
-            data=data,
-        )
-        for q in list(self._subscribers):
+            env = Envelope(
+                type=type_,
+                ts=now_ts(),
+                session_id=self.session_id,
+                seq=seq,
+                device_kind=device_kind,
+                data=data,
+            )
+            if type_ in SESSION_STATE_TYPES:
+                self._session_state[type_] = env
+            targets = list(self._subscribers)
+        for q in targets:
             try:
                 q.put_nowait(env)
             except asyncio.QueueFull:
@@ -67,7 +86,10 @@ class EventBus:
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[asyncio.Queue[Envelope]]:
         q: asyncio.Queue[Envelope] = asyncio.Queue(maxsize=256)
-        self._subscribers.add(q)
+        async with self._lock:
+            for env in sorted(self._session_state.values(), key=lambda e: e.seq):
+                q.put_nowait(env)
+            self._subscribers.add(q)
         try:
             yield q
         finally:
