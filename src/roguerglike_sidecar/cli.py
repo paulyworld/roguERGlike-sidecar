@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import click
 
+from .ble.cadence_bailout import CadenceBailout
 from .ble.ftms_bike import FtmsBikeProfile
 from .ble.ftms_control import FtmsControl
 from .ble.hrs import HrsProfile
@@ -54,6 +55,10 @@ ALL_PROFILES: list[BleProfile] = [FtmsBikeProfile(), HrsProfile()]
 DEFAULT_MAX_TARGET_POWER = 800
 DEFAULT_MIN_TARGET_POWER = 0
 DEFAULT_DISCONNECT_BAILOUT_S = 10.0
+# Static fallbacks when --rider-ftp is not provided. With FTP, both these
+# values are replaced by an intensity-aware curve (see CadenceBailout).
+DEFAULT_CADENCE_BAILOUT_S = 60.0
+DEFAULT_TARGET_POWER_RAMP_S = 3.0
 
 
 def _match_device(devices: list[DiscoveredDevice], query: str) -> DiscoveredDevice | None:
@@ -174,6 +179,9 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     max_target_power: int,
     min_target_power: int,
     disconnect_bailout_s: float,
+    cadence_bailout_s: float,
+    target_power_ramp_s: float,
+    rider_ftp: int | None,
 ) -> None:
     bus = EventBus()
     bike_profile = FtmsBikeProfile()
@@ -261,8 +269,17 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
             )
         )
 
+    # Set up the cadence bailout if trainer control is enabled. We construct
+    # it lazily-bound to the bike source's control client (which doesn't
+    # exist until post-connect). The handler captures `bike_source` and
+    # reads `.control` and `._bailout` each call, so they get the live
+    # instances when the command actually fires.
+    bailout_for_bike: CadenceBailout | None = None
+
     # The command handler dispatches engine→sidecar commands to whichever
-    # source actually owns the trainer (currently only the bike).
+    # source actually owns the trainer (currently only the bike). When the
+    # cadence bailout is active, set_target_power calls are routed through
+    # it so paused-state queueing works correctly.
     async def on_command(command: Command) -> None:
         if isinstance(command, SetTargetPowerCommand):
             if bike_source is None or bike_source.control is None:
@@ -276,7 +293,10 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
                     device_kind=bike_profile.device_kind,
                 )
                 return
-            await bike_source.control.set_target_power(command.watts)
+            if bailout_for_bike is not None:
+                await bailout_for_bike.handle_set_target_power(command.watts)
+            else:
+                await bike_source.control.set_target_power(command.watts)
         elif isinstance(command, StopCommand):
             if bike_source is not None and bike_source.control is not None:
                 await bike_source.control.stop()
@@ -301,11 +321,58 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
             tasks.append(
                 asyncio.create_task(_disconnect_bailout_watcher(bus, sources, disconnect_bailout_s))
             )
+            if bike_source is not None:
+                # Spin up the bailout immediately; it'll only do anything
+                # once the bike source has connected and gained a control
+                # client. The factory closes over the bike source so it can
+                # rebind to the live control as connects come and go.
+                bailout_for_bike = await _spawn_cadence_bailout(
+                    bike_source,
+                    bus,
+                    bike_profile.device_kind,
+                    bike_match.name if bike_match else "bike",
+                    rider_ftp=rider_ftp,
+                    static_bailout_s=cadence_bailout_s,
+                    static_ramp_s=target_power_ramp_s,
+                    tasks=tasks,
+                )
         try:
             await asyncio.gather(*tasks)
         finally:
             for t in tasks:
                 t.cancel()
+
+
+async def _spawn_cadence_bailout(  # noqa: PLR0913 — runner internal
+    bike_source: BleSource,
+    bus: EventBus,
+    device_kind: str,
+    device_name: str,
+    *,
+    rider_ftp: int | None,
+    static_bailout_s: float,
+    static_ramp_s: float,
+    tasks: list[asyncio.Task[None]],
+) -> CadenceBailout:
+    """Wait for the bike's FtmsControl to come online, then construct +
+    start the CadenceBailout. The bailout subscribes to bus cadence events,
+    so we don't need a tight coupling between source attach and bailout
+    spin-up — the bailout simply does nothing until ``control`` exists and
+    ``is_controlling`` is true. We do however need a *non-None* FtmsControl
+    reference to construct it. Hence the short wait."""
+    while bike_source.control is None:
+        await asyncio.sleep(0.5)
+    bailout = CadenceBailout(
+        bike_source.control,
+        bus,
+        device_kind=device_kind,  # type: ignore[arg-type]
+        device_name=device_name,
+        rider_ftp=rider_ftp,
+        static_bailout_s=static_bailout_s,
+        static_ramp_s=static_ramp_s,
+    )
+    tasks.append(asyncio.create_task(bailout.run()))
+    return bailout
 
 
 async def _run_scan() -> None:
@@ -400,6 +467,44 @@ async def _run_scan() -> None:
         "wait this many seconds before issuing Stop. 0 disables the bailout."
     ),
 )
+@click.option(
+    "--cadence-bailout-s",
+    type=float,
+    default=DEFAULT_CADENCE_BAILOUT_S,
+    show_default=True,
+    help=(
+        "If cadence stays below ~30 rpm for this many seconds while ERG is "
+        "active, drop the target to --min-target-power so the cranks free up. "
+        "Used only as a static fallback; with --rider-ftp set, the value is "
+        "computed dynamically per current intensity. Resume is automatic on "
+        "cadence ≥ ~30 rpm."
+    ),
+)
+@click.option(
+    "--target-power-ramp-s",
+    type=float,
+    default=DEFAULT_TARGET_POWER_RAMP_S,
+    show_default=True,
+    help=(
+        "Duration of the resume ramp (seconds) when cadence comes back after "
+        "a bailout. Used only as a static fallback; with --rider-ftp set, the "
+        "value is computed dynamically per current intensity."
+    ),
+)
+@click.option(
+    "--rider-ftp",
+    "rider_ftp",
+    type=int,
+    default=None,
+    help=(
+        "Rider's FTP in watts. When set, the cadence-bailout wait time and "
+        "resume-ramp duration both scale with the current intensity "
+        "(target / FTP). At low intensity: patient bailout + fast ramp. At "
+        "high intensity: fast bailout + slow ramp. Without this flag, the "
+        "static --cadence-bailout-s and --target-power-ramp-s values are "
+        "used at all intensities."
+    ),
+)
 @click.option("--ws-port", type=int, default=WS_PORT, show_default=True)
 @click.option("--ui-port", type=int, default=UI_PORT, show_default=True)
 def main(  # noqa: PLR0913 — CLI fan-in
@@ -412,6 +517,9 @@ def main(  # noqa: PLR0913 — CLI fan-in
     max_target_power: int,
     min_target_power: int,
     disconnect_bailout_s: float,
+    cadence_bailout_s: float,
+    target_power_ramp_s: float,
+    rider_ftp: int | None,
     ws_port: int,
     ui_port: int,
 ) -> None:
@@ -455,6 +563,9 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     max_target_power=max_target_power,
                     min_target_power=min_target_power,
                     disconnect_bailout_s=disconnect_bailout_s,
+                    cadence_bailout_s=cadence_bailout_s,
+                    target_power_ramp_s=target_power_ramp_s,
+                    rider_ftp=rider_ftp,
                 )
             )
         return

@@ -88,6 +88,14 @@ class FtmsControl:
     def last_target_watts(self) -> int | None:
         return self._last_target_watts
 
+    @property
+    def min_target_watts(self) -> int:
+        return self._min_watts
+
+    @property
+    def max_target_watts(self) -> int:
+        return self._max_watts
+
     # --- BLE-side glue ---------------------------------------------------
 
     async def attach(self) -> None:
