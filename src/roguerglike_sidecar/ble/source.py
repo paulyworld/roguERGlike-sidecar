@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ..events import (
@@ -24,10 +25,17 @@ from ..events import (
     EventType,
 )
 from ..ws_server import EventBus
+from .ftms_control import FtmsControl
 from .profile import BleProfile
 
 if TYPE_CHECKING:
     from bleak import BleakClient
+
+# Optional async factory the CLI installs when --allow-trainer-control is set
+# on a profile that supports target writes. Given the live BleakClient, the
+# factory returns an FtmsControl bound to it (or None to opt out per-connect,
+# e.g. if the trainer's reported capabilities don't include target_power).
+ControlFactory = Callable[["BleakClient"], Awaitable["FtmsControl | None"]]
 
 log = logging.getLogger(__name__)
 
@@ -45,17 +53,27 @@ class BleSource:
         bus: EventBus,
         *,
         drop_event_types: frozenset[EventType] = frozenset(),
+        control_factory: ControlFactory | None = None,
     ) -> None:
         """``drop_event_types`` suppresses publishing of specific event types
         decoded from this source's packets. Used for HR de-duplication when a
         chest strap and a bike that embeds HR are both paired: the bike's
         source is configured with ``drop_event_types={"heart_rate"}`` so the
-        strap is the single source of truth on the wire."""
+        strap is the single source of truth on the wire.
+
+        ``control_factory``, if provided, is invoked after the post-connect
+        capability read to attach a stateful control client (currently
+        ``FtmsControl``). It's exposed afterward via ``self.control`` so the
+        CLI's command handler can issue Set Target Power / Stop / etc."""
         self._profile = profile
         self._address = address
         self._name = name
         self._bus = bus
         self._drop_event_types = drop_event_types
+        self._control_factory = control_factory
+        # Becomes non-None after a successful connect with a control factory.
+        # The CLI's command handler reads this attribute.
+        self.control: FtmsControl | None = None
 
     async def on_packet(self, payload: bytes) -> None:
         """Decode one notification payload and publish each resulting event.
@@ -135,6 +153,19 @@ class BleSource:
                 log.info("BLE source %s connected to %s", self._profile.name, self._name)
                 await self._publish_connected()
                 await self._read_and_publish_capabilities(client)
+                if self._control_factory is not None:
+                    self.control = await self._control_factory(client)
+                    if self.control is not None:
+                        try:
+                            await self.control.attach()
+                            await self.control.request_control_and_start()
+                        except Exception:  # noqa: BLE001 — control is opt-in
+                            log.exception(
+                                "BLE source %s: failed to acquire trainer control; "
+                                "telemetry continues read-only",
+                                self._profile.name,
+                            )
+                            self.control = None
                 await client.start_notify(self._profile.char_uuid, handler)
                 while client.is_connected:
                     await asyncio.sleep(1.0)
@@ -144,6 +175,10 @@ class BleSource:
             except Exception:  # noqa: BLE001 — log + back off, don't crash sidecar
                 log.exception("BLE source %s error", self._profile.name)
             finally:
+                if self.control is not None:
+                    with contextlib.suppress(Exception):
+                        await self.control.release("ble_disconnect")
+                    self.control = None
                 if client is not None:
                     # Disconnect on an already-dead client can raise; we don't care.
                     with contextlib.suppress(Exception):
