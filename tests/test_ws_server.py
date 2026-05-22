@@ -8,9 +8,13 @@ import pytest
 
 from roguerglike_sidecar.events import (
     CadenceData,
+    ControlAcquiredData,
+    ControlReleasedData,
+    DeviceCapabilitiesData,
     DeviceConnectedData,
     PowerData,
     SessionStartData,
+    TargetPowerSetData,
 )
 from roguerglike_sidecar.ws_server import EventBus
 
@@ -89,6 +93,85 @@ async def test_early_subscriber_does_not_get_replay_duplicate() -> None:
         )
         first = await asyncio.wait_for(q.get(), timeout=1.0)
         assert first.type == "session_start"
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(q.get(), timeout=0.05)
+
+
+async def test_late_subscriber_receives_device_capabilities_replay() -> None:
+    """An engine that attaches after the sidecar has already read the FTMS
+    Feature characteristic must still learn what the device can be asked to
+    do — capability gating in the engine UI depends on it."""
+    bus = EventBus()
+    await bus.publish(
+        type_="device_capabilities",
+        data=DeviceCapabilitiesData(
+            kind="bike_trainer",
+            name="KICKR",
+            target_power=True,
+            indoor_bike_simulation=True,
+        ),
+        device_kind="bike_trainer",
+    )
+    async with bus.subscribe() as q:
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "device_capabilities"
+    assert isinstance(env.data, DeviceCapabilitiesData)
+    assert env.data.target_power is True
+
+
+async def test_late_subscriber_receives_control_acquired_replay() -> None:
+    """An engine that reconnects mid-session needs to know whether the sidecar
+    is currently holding the trainer (so its ERG UI reflects reality)."""
+    bus = EventBus()
+    await bus.publish(
+        type_="control_acquired",
+        data=ControlAcquiredData(kind="bike_trainer", name="KICKR"),
+        device_kind="bike_trainer",
+    )
+    async with bus.subscribe() as q:
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "control_acquired"
+
+
+async def test_late_subscriber_sees_acquired_then_released_in_order() -> None:
+    """If control was claimed and later released, both events replay in seq
+    order. Net effect for the engine: "control was acquired then released —
+    currently released", which matches reality."""
+    bus = EventBus()
+    await bus.publish(
+        type_="control_acquired",
+        data=ControlAcquiredData(kind="bike_trainer", name="KICKR"),
+        device_kind="bike_trainer",
+    )
+    await bus.publish(
+        type_="control_released",
+        data=ControlReleasedData(kind="bike_trainer", name="KICKR", reason="stop"),
+        device_kind="bike_trainer",
+    )
+
+    async with bus.subscribe() as q:
+        first = await asyncio.wait_for(q.get(), timeout=1.0)
+        second = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert first.type == "control_acquired"
+    assert second.type == "control_released"
+    assert first.seq < second.seq
+
+
+async def test_target_power_set_is_not_replayed() -> None:
+    """``target_power_set`` is an ack of a specific command, not ambient
+    state. A late subscriber should not see a stale ack from a previous
+    engine instance's command. The engine can re-issue set_target_power if
+    it wants to assert the current target."""
+    bus = EventBus()
+    await bus.publish(
+        type_="target_power_set",
+        data=TargetPowerSetData(watts=235, accepted=True),
+        device_kind="bike_trainer",
+    )
+    async with bus.subscribe() as q:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(q.get(), timeout=0.05)
 

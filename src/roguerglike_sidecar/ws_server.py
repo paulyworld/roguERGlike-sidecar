@@ -44,13 +44,26 @@ log = logging.getLogger(__name__)
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8421
 
-# Events that describe session-level state a client needs to interpret the live
-# stream. The bus remembers the most recent envelope of each type and replays
-# them to every new subscriber so a client that connects mid-session still
-# learns the session id and which device is attached. Per-tick telemetry
+# Events that describe session-level state a client needs to interpret the
+# live stream. The bus remembers the most recent envelope of each type and
+# replays them to every new subscriber so a client that connects mid-session
+# still learns: the session id, what device is attached, what the device can
+# do, and whether the sidecar currently holds control. Per-tick telemetry
 # (power, cadence, heart_rate, ...) is deliberately NOT replayed.
+#
+# ``target_power_set`` is deliberately NOT replayed either — it's an
+# acknowledgement of a specific command rather than ambient state. An engine
+# reconnecting can issue a fresh ``set_target_power`` if it wants to assert
+# the current ERG target.
 SESSION_STATE_TYPES: frozenset[EventType] = frozenset(
-    {"session_start", "device_connected", "device_disconnected"}
+    {
+        "session_start",
+        "device_connected",
+        "device_disconnected",
+        "device_capabilities",
+        "control_acquired",
+        "control_released",
+    }
 )
 
 

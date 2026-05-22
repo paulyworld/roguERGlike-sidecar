@@ -90,6 +90,28 @@ def _make(
     )
 
 
+async def _next_of_type(
+    q: asyncio.Queue,
+    type_: str,
+    *,
+    timeout_s: float = 1.0,
+) -> object:
+    """Read from ``q`` until an envelope of the given ``type_`` arrives.
+
+    Tests that subscribe AFTER ``request_control_and_start`` get the
+    replayed ``control_acquired`` event first (it's session-state), then the
+    test's own event. Rather than count expected leading events per test,
+    skip past whatever's there until the one we care about lands."""
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise TimeoutError(f"no {type_} event received within {timeout_s}s")
+        env = await asyncio.wait_for(q.get(), timeout=remaining)
+        if env.type == type_:
+            return env
+
+
 # --- happy path -----------------------------------------------------------
 
 
@@ -120,9 +142,8 @@ async def test_set_target_power_writes_int16_and_publishes_accepted() -> None:
 
     async with bus.subscribe() as q:
         await ctrl.set_target_power(235)
-        env = await asyncio.wait_for(q.get(), timeout=1.0)
+        env = await _next_of_type(q, "target_power_set")
 
-    assert env.type == "target_power_set"
     assert isinstance(env.data, TargetPowerSetData)
     assert env.data.watts == 235
     assert env.data.accepted is True
@@ -144,7 +165,7 @@ async def test_set_target_power_clamps_above_max() -> None:
 
     async with bus.subscribe() as q:
         await ctrl.set_target_power(9999)
-        env = await asyncio.wait_for(q.get(), timeout=1.0)
+        env = await _next_of_type(q, "target_power_set")
 
     assert env.data.watts == 400  # type: ignore[union-attr]
     expected = bytes([OP_SET_TARGET_POWER]) + struct.pack("<h", 400)
@@ -160,7 +181,7 @@ async def test_set_target_power_clamps_below_min() -> None:
 
     async with bus.subscribe() as q:
         await ctrl.set_target_power(10)
-        env = await asyncio.wait_for(q.get(), timeout=1.0)
+        env = await _next_of_type(q, "target_power_set")
 
     assert env.data.watts == 50  # type: ignore[union-attr]
 
@@ -206,7 +227,7 @@ async def test_set_target_power_trainer_rejection_surfaces_in_reason() -> None:
 
     async with bus.subscribe() as q:
         await ctrl.set_target_power(200)
-        env = await asyncio.wait_for(q.get(), timeout=1.0)
+        env = await _next_of_type(q, "target_power_set")
 
     assert env.data.accepted is False  # type: ignore[union-attr]
     assert "0x03" in env.data.reason  # type: ignore[union-attr]
@@ -228,10 +249,9 @@ async def test_stop_releases_controlling_state() -> None:
 
     async with bus.subscribe() as q:
         await ctrl.stop()
-        env = await asyncio.wait_for(q.get(), timeout=1.0)
+        env = await _next_of_type(q, "control_released")
 
     assert ctrl.is_controlling is False
-    assert env.type == "control_released"
     assert env.data.reason == "stop"  # type: ignore[union-attr]
 
 
