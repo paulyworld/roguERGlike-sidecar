@@ -41,6 +41,10 @@ class HrsProfile:
     service_uuid: str = HRS_SERVICE_UUID
     char_uuid: str = HR_MEASUREMENT_CHAR_UUID
     device_kind: DeviceKind = "hr_sensor"
+    # HRS has no relevant feature characteristic for our schema (the Body
+    # Sensor Location char exists but doesn't map to any of our capability
+    # flags). Leave the optional capability hook off.
+    feature_char_uuid: str | None = None
 
     def decode(self, payload: bytes) -> Iterable[tuple[EventType, EventData]]:
         if len(payload) < 2:

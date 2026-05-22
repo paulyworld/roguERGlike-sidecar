@@ -8,7 +8,10 @@ expected events the decoder must yield.
 
 from __future__ import annotations
 
-from roguerglike_sidecar.ble.ftms_bike import FtmsBikeProfile
+from roguerglike_sidecar.ble.ftms_bike import (
+    FtmsBikeProfile,
+    parse_target_setting_features,
+)
 from roguerglike_sidecar.events import (
     CadenceData,
     EventData,
@@ -97,3 +100,92 @@ def test_profile_metadata() -> None:
     assert p.device_kind == "bike_trainer"
     assert p.service_uuid.endswith("00805f9b34fb")
     assert p.char_uuid.endswith("00805f9b34fb")
+    # Capability discovery is opted into via these two attributes.
+    assert p.feature_char_uuid is not None
+    assert p.feature_char_uuid.endswith("00805f9b34fb")
+
+
+# --- FTMS Fitness Machine Feature characteristic (0x2ACC) ----------------
+#
+# 8 bytes total: lower u32 = sensor feature bitmap (irrelevant to capabilities
+# in our schema); upper u32 = target setting feature bitmap. The decoder only
+# looks at the upper u32 and the schema-modelled subset of bits in it.
+
+
+def _feature_payload(target_bits: int, sensor_bits: int = 0) -> bytes:
+    """Build a synthetic 8-byte FTMS Feature characteristic payload."""
+    return sensor_bits.to_bytes(4, "little") + target_bits.to_bytes(4, "little")
+
+
+def test_features_all_zero_means_no_capabilities() -> None:
+    assert parse_target_setting_features(_feature_payload(0x00000000)) == {
+        "target_power": False,
+        "target_resistance": False,
+        "target_inclination": False,
+        "target_heart_rate": False,
+        "indoor_bike_simulation": False,
+    }
+
+
+def test_features_power_target_only() -> None:
+    # bit 3 = Power Target Setting Supported
+    caps = parse_target_setting_features(_feature_payload(1 << 3))
+    assert caps["target_power"] is True
+    assert caps["target_resistance"] is False
+    assert caps["indoor_bike_simulation"] is False
+
+
+def test_features_kickr_like_power_plus_simulation() -> None:
+    # bits 3 + 13: typical smart trainer profile (ERG + SIM).
+    bits = (1 << 3) | (1 << 13)
+    caps = parse_target_setting_features(_feature_payload(bits))
+    assert caps["target_power"] is True
+    assert caps["indoor_bike_simulation"] is True
+    assert caps["target_resistance"] is False
+
+
+def test_features_all_schema_flags_set() -> None:
+    # bits 1 (inclination) + 2 (resistance) + 3 (power) + 4 (HR) + 13 (sim).
+    bits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 13)
+    caps = parse_target_setting_features(_feature_payload(bits))
+    assert all(caps.values())
+
+
+def test_features_sensor_bits_do_not_leak_into_target_caps() -> None:
+    # Lower u32 set to bits that map to schema flags in the *target* table;
+    # the parser must ignore them.
+    caps = parse_target_setting_features(_feature_payload(0x00000000, sensor_bits=0xFFFFFFFF))
+    assert all(v is False for v in caps.values())
+
+
+def test_features_reserved_bits_are_ignored() -> None:
+    # Bits 17-31 are reserved; they shouldn't affect any modelled flag.
+    bits = 0xFFFE0000  # all reserved bits set, no modelled bits
+    caps = parse_target_setting_features(_feature_payload(bits))
+    assert all(v is False for v in caps.values())
+
+
+def test_features_truncated_payload_yields_safe_defaults() -> None:
+    # Some trainers omit or return shorter feature payloads. Decoder must be
+    # total — return all False rather than raise.
+    assert parse_target_setting_features(b"") == {
+        "target_power": False,
+        "target_resistance": False,
+        "target_inclination": False,
+        "target_heart_rate": False,
+        "indoor_bike_simulation": False,
+    }
+    assert parse_target_setting_features(b"\x00\x00\x00\x00") == {
+        "target_power": False,
+        "target_resistance": False,
+        "target_inclination": False,
+        "target_heart_rate": False,
+        "indoor_bike_simulation": False,
+    }
+
+
+def test_profile_parse_features_delegates_to_module_function() -> None:
+    # The profile method is a thin wrapper; one fixture confirms the wiring.
+    profile = FtmsBikeProfile()
+    bits = (1 << 3) | (1 << 13)
+    assert profile.parse_features(_feature_payload(bits))["target_power"] is True

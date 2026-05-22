@@ -62,6 +62,27 @@ class DeviceDisconnectedData(_StrictModel):
     name: str
 
 
+class DeviceCapabilitiesData(_StrictModel):
+    """What a connected device can be asked to do.
+
+    Emitted once per device shortly after ``device_connected``. The booleans
+    are pure capability flags — they say nothing about whether the host has
+    asked to use them or whether the connection currently has control. The
+    eventual trainer-control work (FTMS Control Point writes) will be gated
+    on ``target_power`` here.
+    """
+
+    kind: DeviceKind
+    name: str
+    # FTMS Target Setting Features (Bluetooth SIG, characteristic 0x2ACC upper
+    # 4 bytes). Names track the spec's bit-name fields.
+    target_power: bool = False
+    target_resistance: bool = False
+    target_inclination: bool = False
+    target_heart_rate: bool = False
+    indoor_bike_simulation: bool = False
+
+
 class SessionStartData(_StrictModel):
     session_id: UUID
 
@@ -79,6 +100,7 @@ EventType = Literal[
     "distance",
     "device_connected",
     "device_disconnected",
+    "device_capabilities",
     "session_start",
     "session_end",
 ]
@@ -91,6 +113,7 @@ EventData = (
     | DistanceData
     | DeviceConnectedData
     | DeviceDisconnectedData
+    | DeviceCapabilitiesData
     | SessionStartData
     | SessionEndData
 )
