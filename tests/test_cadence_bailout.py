@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 from typing import Any
 
 import pytest
@@ -386,6 +387,78 @@ async def test_watcher_engages_after_static_bailout_window() -> None:
 
     assert isinstance(env.data, CadenceBailoutEngagedData)
     assert env.data.pre_pause_target_watts == 200
+
+
+# --- bug A: idle timer resets on first meaningful target ----------------
+
+
+async def test_handle_set_target_power_resets_idle_timer_for_non_floor() -> None:
+    """The original bailout bug: _last_active_ts initialized at __init__
+    measured "time since sidecar startup" rather than "time since rider
+    stopped at a meaningful target". Operator delay between sidecar launch
+    and pressing Start Workout → bailout fires on the first warmup target.
+
+    Fix: handle_set_target_power refreshes _last_active_ts when a non-floor
+    target is being written. The idle window then correctly measures "time
+    since last cadence event OR last meaningful target" — the bailout's
+    intended semantic."""
+    ctrl, _client, bus = await _make_control(min_w=20)
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+    )
+    # Simulate "operator opened sidecar long ago"
+    stale_ts = time.monotonic() - 1000.0
+    bailout._last_active_ts = stale_ts  # noqa: SLF001
+
+    # Routing a non-floor target through must refresh the timer.
+    await bailout.handle_set_target_power(150)
+    assert bailout._last_active_ts > stale_ts + 999  # noqa: SLF001 — was just reset
+
+
+async def test_handle_set_target_power_does_not_reset_for_floor_target() -> None:
+    """A target at or below the configured floor is "release" / "free spin"
+    semantics, not "rider is at a meaningful target". Don't reset the idle
+    timer for these — they shouldn't keep the bailout disarmed."""
+    ctrl, _client, bus = await _make_control(min_w=20)
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+    )
+    stale_ts = time.monotonic() - 1000.0
+    bailout._last_active_ts = stale_ts  # noqa: SLF001
+
+    await bailout.handle_set_target_power(20)  # equals min_w
+    assert bailout._last_active_ts == stale_ts  # noqa: SLF001 — unchanged
+
+
+async def test_first_meaningful_target_after_long_idle_doesnt_immediately_engage() -> None:
+    """End-to-end check that the bug-A regression is gone: stale _last_active_ts
+    + first non-floor target via handle_set_target_power → watcher's next
+    tick must NOT engage the bailout."""
+    ctrl, _client, bus = await _make_control(min_w=20)
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=0.1,  # very tight window — would trip without the fix
+    )
+    bailout._last_active_ts = time.monotonic() - 1000.0  # noqa: SLF001
+
+    await bailout.handle_set_target_power(200)
+    # Watcher tick after the timer reset shouldn't engage.
+    task = asyncio.create_task(bailout._watcher_loop())  # noqa: SLF001
+    await asyncio.sleep(0.05)  # let one watcher iteration pass
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not bailout.is_paused
 
 
 # --- silent-rejection fix (ws_server) -------------------------------------

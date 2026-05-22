@@ -167,6 +167,14 @@ class CadenceBailout:
         to the trainer. The engine receives a ``target_power_set`` ack
         with ``reason="bailout-pending"`` so it can distinguish queued from
         applied. While active, passes straight through to the FtmsControl.
+
+        A non-floor target also resets the idle timer. The bailout's
+        semantic is "rider has been off the bike at a meaningful target for
+        N seconds" — so the clock starts ticking from the first meaningful
+        target, not from the bailout's own construction time. Without this,
+        an operator who launches the sidecar and waits >N seconds before
+        pressing Start Workout would have the bailout fire immediately on
+        the engine's first ``set_target_power``.
         """
         if self._paused:
             self._pre_pause_target = int(watts)
@@ -180,6 +188,8 @@ class CadenceBailout:
                 device_kind=self._device_kind,
             )
             return
+        if watts > self._control.min_target_watts:
+            self._last_active_ts = time.monotonic()
         await self._control.set_target_power(watts)
 
     # --- bus subscription + watcher ----------------------------------

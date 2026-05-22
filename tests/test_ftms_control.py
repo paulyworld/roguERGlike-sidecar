@@ -133,6 +133,29 @@ async def test_request_control_and_start_publishes_control_acquired() -> None:
     assert client.writes[1] == bytes([OP_START])
 
 
+async def test_request_control_and_start_logs_explicit_success_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """KICKR LED state is a misleading proxy for "control claimed" — solid
+    blue just means BLE GATT connected. The sidecar log should carry an
+    explicit success line so operators can verify the actual control claim."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="roguerglike_sidecar.ble.ftms_control")
+    bus = EventBus()
+    client = _MockClient()
+    ctrl = _make(client, bus)
+    await ctrl.attach()
+    await ctrl.request_control_and_start()
+
+    matching = [
+        r
+        for r in caplog.records
+        if "claimed control" in r.getMessage() and "MockKICKR" in r.getMessage()
+    ]
+    assert matching, "expected a 'claimed control of <device>' INFO log line on success"
+
+
 async def test_set_target_power_writes_int16_and_publishes_accepted() -> None:
     bus = EventBus()
     client = _MockClient()

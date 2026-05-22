@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from roguerglike_sidecar.ble.scan import DiscoveredDevice
-from roguerglike_sidecar.cli import _match_device, _resolve_drop_types
+from roguerglike_sidecar.cli import _match_device, _resolve_drop_types, _resolve_matches
 
 
 def _devs() -> list[DiscoveredDevice]:
@@ -69,3 +69,77 @@ def test_drop_types_neither_paired_no_suppression() -> None:
     must still be sane if it's ever called with no sources."""
     bike, hr = _resolve_drop_types(has_bike=False, has_hr=False, prefer_bike_hr=False)
     assert bike == frozenset() and hr == frozenset()
+
+
+# --- scan-retry partial matching (`_resolve_matches`) ---------------------
+#
+# Forgiving scan loop in _run_live re-scans until all queries match, printing
+# what's still missing between cycles. The pure resolution between scan
+# results and queries is testable in isolation.
+
+
+def _scan_with(
+    *devices_by_profile: tuple[str, list[DiscoveredDevice]],
+) -> dict[str, list[DiscoveredDevice]]:
+    return dict(devices_by_profile)
+
+
+def test_resolve_matches_all_present() -> None:
+    discovered = _scan_with(
+        ("FTMS Bike", [DiscoveredDevice("AA:BB", "KICKR CORE 8B2A", -50)]),
+        ("HR Sensor", [DiscoveredDevice("CC:DD", "MUDRAT-DETECTOR", -65)]),
+    )
+    matched, missing = _resolve_matches(
+        discovered,
+        {"FTMS Bike": "KICKR", "HR Sensor": "mudrat"},
+    )
+    assert missing == []
+    assert matched["FTMS Bike"].name == "KICKR CORE 8B2A"
+    assert matched["HR Sensor"].name == "MUDRAT-DETECTOR"
+
+
+def test_resolve_matches_reports_missing_profiles() -> None:
+    """A scan cycle that produces no devices for one profile should leave
+    that profile's query in ``missing`` so the retry loop knows what to
+    keep waiting for."""
+    discovered = _scan_with(
+        ("FTMS Bike", [DiscoveredDevice("AA:BB", "KICKR CORE 8B2A", -50)]),
+        ("HR Sensor", []),  # Whoop didn't show up yet
+    )
+    matched, missing = _resolve_matches(
+        discovered,
+        {"FTMS Bike": "KICKR", "HR Sensor": "mudrat"},
+    )
+    assert missing == ["HR Sensor"]
+    assert "FTMS Bike" in matched and "HR Sensor" not in matched
+
+
+def test_resolve_matches_skips_already_satisfied() -> None:
+    """Queries already matched from a previous cycle stay matched even if
+    the new scan happens not to include the device (advertisement gap).
+    Avoids re-failing on a device we already know is there."""
+    discovered = _scan_with(
+        ("FTMS Bike", []),  # KICKR briefly missed this advertisement cycle
+        ("HR Sensor", [DiscoveredDevice("CC:DD", "MUDRAT-DETECTOR", -65)]),
+    )
+    already = {"FTMS Bike": DiscoveredDevice("AA:BB", "KICKR CORE 8B2A", -55)}
+    matched, missing = _resolve_matches(
+        discovered,
+        {"FTMS Bike": "KICKR", "HR Sensor": "mudrat"},
+        already=already,
+    )
+    assert missing == []
+    assert matched["FTMS Bike"].address == "AA:BB"  # carried over from `already`
+    assert matched["HR Sensor"].name == "MUDRAT-DETECTOR"
+
+
+def test_resolve_matches_query_substring_against_scan_results() -> None:
+    """``_resolve_matches`` defers to ``_match_device`` for each query, which
+    falls back to substring matching on names. So a query like 'mudrat'
+    finds 'MUDRAT-DETECTOR'."""
+    discovered = _scan_with(
+        ("HR Sensor", [DiscoveredDevice("CC:DD", "MUDRAT-DETECTOR", -65)]),
+    )
+    matched, missing = _resolve_matches(discovered, {"HR Sensor": "mudrat"})
+    assert missing == []
+    assert matched["HR Sensor"].name == "MUDRAT-DETECTOR"
