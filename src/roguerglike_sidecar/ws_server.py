@@ -33,6 +33,8 @@ from .events import (
     Envelope,
     EventData,
     EventType,
+    SetTargetPowerCommand,
+    TargetPowerSetData,
     now_ts,
     parse_command_json,
 )
@@ -137,6 +139,34 @@ class EventBus:
             self._subscribers.discard(q)
 
 
+async def _publish_no_handler_rejection(bus: EventBus, command: Command) -> None:
+    """Surface a typed rejection event when a command arrives with no handler.
+
+    For commands that have a paired ack event (currently only
+    ``set_target_power`` → ``target_power_set``), emit the ack with
+    ``accepted=false`` and an explicit reason. Other commands fall through
+    to a warning log — they have no client-observable ack envelope to fill,
+    and the dispatcher being unconfigured is the same condition for all of
+    them, so we don't need duplicate rejections.
+    """
+    if isinstance(command, SetTargetPowerCommand):
+        await bus.publish(
+            type_="target_power_set",
+            data=TargetPowerSetData(
+                watts=command.watts,
+                accepted=False,
+                reason="trainer-control disabled (no --allow-trainer-control flag)",
+            ),
+            device_kind="bike_trainer",
+        )
+        return
+    log.warning(
+        "received command %s but no handler is configured (sidecar not "
+        "running with --allow-trainer-control?)",
+        command.type,
+    )
+
+
 async def _send_loop(
     connection: ServerConnection,
     queue: asyncio.Queue[Envelope],
@@ -148,9 +178,18 @@ async def _send_loop(
 
 async def _recv_loop(
     connection: ServerConnection,
+    bus: EventBus,
     on_command: CommandHandler | None,
 ) -> None:
-    """Read inbound messages, validate as :data:`Command`, dispatch."""
+    """Read inbound messages, validate as :data:`Command`, dispatch.
+
+    When ``on_command`` is None (the sidecar wasn't started with
+    ``--allow-trainer-control``), commands that have a paired ack event get
+    an explicit rejection envelope so clients can distinguish "flag missing"
+    from "device not present" from "trainer rejected". The previous
+    log-and-drop behaviour was a silent footgun on the engine side — see
+    project memory ``opt-in-flags-need-feedback``.
+    """
     async for message in connection:
         if not isinstance(message, str):
             log.warning("ignoring non-text WS frame")
@@ -161,7 +200,7 @@ async def _recv_loop(
             log.warning("dropping malformed command: %s", e.errors()[0]["msg"] if e.errors() else e)
             continue
         if on_command is None:
-            log.warning("received command %s but no handler is configured", command.type)
+            await _publish_no_handler_rejection(bus, command)
             continue
         try:
             await on_command(command)
@@ -178,7 +217,7 @@ async def _handle_client(
     log.info("client connected: %s", peer)
     async with bus.subscribe() as queue:
         send = asyncio.create_task(_send_loop(connection, queue))
-        recv = asyncio.create_task(_recv_loop(connection, on_command))
+        recv = asyncio.create_task(_recv_loop(connection, bus, on_command))
         try:
             # Either side ending (clean disconnect on recv, error on either)
             # closes the whole client connection.

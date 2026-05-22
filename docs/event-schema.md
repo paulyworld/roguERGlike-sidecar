@@ -186,9 +186,61 @@ from safety bailouts (`ws_disconnect_bailout`, etc.).
 Acknowledges (or rejects) a client `set_target_power` command. `watts` is
 the value actually sent to the trainer after sidecar-side clamping; for a
 rejected command it's the requested value with `accepted: false` and
-`reason` populated.
+`reason` populated. Known rejection reasons today:
+
+- `"trainer-control disabled (no --allow-trainer-control flag)"` — sidecar
+  is read-only; the engine should surface this to the rider rather than
+  silently ignoring (per project memory `opt-in-flags-need-feedback`).
+- `"no controllable bike"` — `--allow-trainer-control` was set but no FTMS
+  bike has a live control session yet (e.g. connection in flight or lost).
+- `"not controlling"` — Request Control / Start hasn't completed.
+- `"bailout-pending"` — cadence bailout is engaged; the new target was
+  saved as the *intended* restore value but won't be written to the
+  trainer until cadence resumes.
+- `"trainer rejected (0x##)"` — trainer's FTMS response indication carried
+  a non-success result code; the hex code is the spec's result code byte.
+- `"indication timeout"` — trainer never sent the response indication.
+
 ```json
 { "type": "target_power_set", "data": { "watts": 235, "accepted": true, "reason": "" } }
+```
+
+### `cadence_bailout_engaged`
+The sidecar's cadence-bailout safety has dropped the trainer's target to
+`--min-target-power` because cadence has been below the active threshold
+(≈30 rpm) long enough that the rider is no longer pedalling. The engine
+should treat this as a soft pause (UI overlay, optional clock pause).
+The trainer is still under control; resume is automatic on cadence ≥ ~30
+rpm. The wait duration is intensity-aware when `--rider-ftp` is set —
+short bailout at high % FTP, longer at low (see project memory
+`intensity-aware-safety-curves`).
+
+```json
+{
+  "type": "cadence_bailout_engaged",
+  "data": {
+    "kind": "bike_trainer",
+    "name": "KICKR CORE 8B2A",
+    "pre_pause_target_watts": 300,
+    "bailout_after_s": 22.5
+  }
+}
+```
+
+### `cadence_bailout_disengaged`
+Cadence resumed; the sidecar has finished ramping the target back to the
+pre-pause value (or whatever the engine set via `set_target_power` during
+the pause, since those commands update the intended restore value).
+```json
+{
+  "type": "cadence_bailout_disengaged",
+  "data": {
+    "kind": "bike_trainer",
+    "name": "KICKR CORE 8B2A",
+    "restored_to_watts": 300,
+    "ramped_over_s": 7.0
+  }
+}
 ```
 
 ## Inbound commands (engine → sidecar)

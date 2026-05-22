@@ -113,6 +113,32 @@ class TargetPowerSetData(_StrictModel):
     reason: str = ""
 
 
+class CadenceBailoutEngagedData(_StrictModel):
+    """Cadence has been below the active threshold long enough that the
+    sidecar dropped the trainer's target to its configured floor so an
+    absent rider isn't left with locked-up cranks. The engine should treat
+    this as a soft pause: visually indicate it, optionally pause workout
+    timers. The trainer is still under control; resume happens automatically
+    on cadence ≥ resume threshold."""
+
+    kind: DeviceKind
+    name: str
+    pre_pause_target_watts: int
+    bailout_after_s: float
+
+
+class CadenceBailoutDisengagedData(_StrictModel):
+    """Cadence resumed; the sidecar has finished ramping the target back to
+    the value it was at when the bailout engaged (or whatever the engine has
+    asked for since, if it issued ``set_target_power`` during the pause).
+    Workout / UI can return to its active state."""
+
+    kind: DeviceKind
+    name: str
+    restored_to_watts: int
+    ramped_over_s: float
+
+
 class SessionStartData(_StrictModel):
     session_id: UUID
 
@@ -134,6 +160,8 @@ EventType = Literal[
     "control_acquired",
     "control_released",
     "target_power_set",
+    "cadence_bailout_engaged",
+    "cadence_bailout_disengaged",
     "session_start",
     "session_end",
 ]
@@ -150,6 +178,8 @@ EventData = (
     | ControlAcquiredData
     | ControlReleasedData
     | TargetPowerSetData
+    | CadenceBailoutEngagedData
+    | CadenceBailoutDisengagedData
     | SessionStartData
     | SessionEndData
 )
@@ -173,6 +203,8 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "control_acquired": ControlAcquiredData,
     "control_released": ControlReleasedData,
     "target_power_set": TargetPowerSetData,
+    "cadence_bailout_engaged": CadenceBailoutEngagedData,
+    "cadence_bailout_disengaged": CadenceBailoutDisengagedData,
     "session_start": SessionStartData,
     "session_end": SessionEndData,
 }

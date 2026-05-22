@@ -83,6 +83,12 @@ roguerglike-sidecar --mode live --device-bike "KICKR" --allow-trainer-control
 roguerglike-sidecar --mode live --device-bike "KICKR" --allow-trainer-control \
     --max-target-power 400 --disconnect-bailout-s 5
 
+# Trainer control + intensity-aware cadence bailout (recommended for real rides).
+# With --rider-ftp set, the bailout wait + resume ramp adapt to current % FTP:
+# patient at low intensity, fast at high intensity (per intensity-aware-safety-curves).
+roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "mudrat" \
+    --allow-trainer-control --rider-ftp 250
+
 # Mock mode with trainer control accepted — useful for engine ERG dev off-bike.
 roguerglike-sidecar --mode mock --allow-trainer-control
 
