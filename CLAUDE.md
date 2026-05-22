@@ -75,6 +75,17 @@ roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "Polar" --pref
 # HR-only run (no bike)
 roguerglike-sidecar --mode live --device-hr "TICKR"
 
+# Opt in to trainer control (FTMS Control Point writes — ERG mode).
+# Aggressive defaults per project memory: 0-800W cap; 10s disconnect bailout.
+roguerglike-sidecar --mode live --device-bike "KICKR" --allow-trainer-control
+
+# Same, with a more conservative wattage cap and a 5s disconnect bailout.
+roguerglike-sidecar --mode live --device-bike "KICKR" --allow-trainer-control \
+    --max-target-power 400 --disconnect-bailout-s 5
+
+# Mock mode with trainer control accepted — useful for engine ERG dev off-bike.
+roguerglike-sidecar --mode mock --allow-trainer-control
+
 # Replay a recorded session  (NOT YET IMPLEMENTED — Phase 3)
 roguerglike-sidecar --mode replay --file rides/example.jsonl
 

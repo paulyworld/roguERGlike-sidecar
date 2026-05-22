@@ -11,7 +11,7 @@ import time
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DeviceKind = Literal[
     "bike_trainer",
@@ -83,6 +83,36 @@ class DeviceCapabilitiesData(_StrictModel):
     indoor_bike_simulation: bool = False
 
 
+class ControlAcquiredData(_StrictModel):
+    """The sidecar has successfully claimed the device's Fitness Machine
+    Control Point (Request Control + Start both acknowledged). From this
+    point, ``set_target_power`` commands have effect."""
+
+    kind: DeviceKind
+    name: str
+
+
+class ControlReleasedData(_StrictModel):
+    """Control of the device has been released — either gracefully via the
+    sidecar issuing Stop, or implicitly via a BLE disconnect, or because the
+    engine WS dropped past the safety grace window."""
+
+    kind: DeviceKind
+    name: str
+    reason: str
+
+
+class TargetPowerSetData(_StrictModel):
+    """Acknowledges (or rejects) a ``set_target_power`` command. ``watts`` is
+    the actual value sent to the trainer after sidecar-side clamping; for a
+    rejected command it's the unclamped requested value with ``accepted``
+    False and ``reason`` populated."""
+
+    watts: int
+    accepted: bool
+    reason: str = ""
+
+
 class SessionStartData(_StrictModel):
     session_id: UUID
 
@@ -101,6 +131,9 @@ EventType = Literal[
     "device_connected",
     "device_disconnected",
     "device_capabilities",
+    "control_acquired",
+    "control_released",
+    "target_power_set",
     "session_start",
     "session_end",
 ]
@@ -114,9 +147,35 @@ EventData = (
     | DeviceConnectedData
     | DeviceDisconnectedData
     | DeviceCapabilitiesData
+    | ControlAcquiredData
+    | ControlReleasedData
+    | TargetPowerSetData
     | SessionStartData
     | SessionEndData
 )
+
+
+# Map event type literals to the concrete data class that carries their
+# payload. Used by Envelope's pre-validator to pick the right class — without
+# this, identically-shaped data models (DeviceConnectedData vs
+# ControlAcquiredData, both ``{kind, name}``) get round-tripped as the first
+# union member, which is correct on the wire but loses type identity in
+# Python consumers.
+_DATA_BY_TYPE: dict[str, type[BaseModel]] = {
+    "power": PowerData,
+    "cadence": CadenceData,
+    "heart_rate": HeartRateData,
+    "speed": SpeedData,
+    "distance": DistanceData,
+    "device_connected": DeviceConnectedData,
+    "device_disconnected": DeviceDisconnectedData,
+    "device_capabilities": DeviceCapabilitiesData,
+    "control_acquired": ControlAcquiredData,
+    "control_released": ControlReleasedData,
+    "target_power_set": TargetPowerSetData,
+    "session_start": SessionStartData,
+    "session_end": SessionEndData,
+}
 
 
 class Envelope(BaseModel):
@@ -131,6 +190,23 @@ class Envelope(BaseModel):
     device_kind: DeviceKind
     data: EventData
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_data_to_typed_class(cls, values: object) -> object:
+        """When parsing from a dict (e.g. ``model_validate_json``), use the
+        envelope's ``type`` field to pick the matching data class. This makes
+        round-trips type-stable even for data models whose shapes are
+        identical (e.g. ``DeviceConnectedData`` and ``ControlAcquiredData``)."""
+        if not isinstance(values, dict):
+            return values
+        type_ = values.get("type")
+        data = values.get("data")
+        if isinstance(data, dict) and isinstance(type_, str):
+            expected = _DATA_BY_TYPE.get(type_)
+            if expected is not None:
+                values["data"] = expected.model_validate(data)
+        return values
+
     def to_wire(self) -> str:
         return self.model_dump_json()
 
@@ -138,3 +214,60 @@ class Envelope(BaseModel):
 def now_ts() -> float:
     """Wall-clock seconds; chosen over monotonic so timestamps survive restarts."""
     return time.time()
+
+
+# --- inbound command envelopes (engine → sidecar) -------------------------
+#
+# The WS connection is bidirectional: events flow sidecar→client (Envelope
+# above) and commands flow client→sidecar (Command discriminated union below).
+# Commands are validated against this schema; malformed messages are logged
+# and dropped without affecting the event stream.
+
+
+class SetTargetPowerCommand(BaseModel):
+    """Set the trainer's ERG target wattage. Sidecar clamps to its configured
+    safety bounds before issuing the FTMS opcode."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["set_target_power"]
+    watts: int = Field(ge=-1000, le=5000)
+
+
+class StartCommand(BaseModel):
+    """Issue FTMS Start/Resume (opcode 0x07) — enter active workout state."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["start"]
+
+
+class StopCommand(BaseModel):
+    """Issue FTMS Stop/Pause (opcode 0x08, stop subcode 0x01)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["stop"]
+
+
+class ReleaseControlCommand(BaseModel):
+    """Stop the workout and explicitly release the Control Point. Useful when
+    the game wants to switch the trainer back to passive telemetry without
+    disconnecting the BLE link."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["release_control"]
+
+
+Command = Annotated[
+    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand,
+    Field(discriminator="type"),
+]
+
+
+ParsedCommand = SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand
+
+
+def parse_command_json(text: str) -> ParsedCommand:
+    """Validate an incoming WS message as a Command. Raises ``ValidationError``
+    on anything that isn't a recognized command shape."""
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(Command).validate_json(text)

@@ -93,6 +93,83 @@ async def test_early_subscriber_does_not_get_replay_duplicate() -> None:
             await asyncio.wait_for(q.get(), timeout=0.05)
 
 
+async def test_subscriber_count_tracks_subscribe_lifecycle() -> None:
+    """The live runner's disconnect-bailout watcher polls subscriber_count to
+    know when to arm/disarm. Confirm the count tracks subscribe-as-context."""
+    bus = EventBus()
+    assert bus.subscriber_count == 0
+    async with bus.subscribe():
+        assert bus.subscriber_count == 1
+        async with bus.subscribe():
+            assert bus.subscriber_count == 2
+        assert bus.subscriber_count == 1
+    assert bus.subscriber_count == 0
+
+
+# --- bidirectional WS: inbound commands ---------------------------------
+
+
+async def test_inbound_set_target_power_invokes_on_command_handler() -> None:
+    """End-to-end through ``run_ws_server``: a websockets client sends a
+    valid SetTargetPower command; the configured on_command handler receives
+    it. Exercises the recv loop, the parse layer, and the dispatch."""
+    import websockets
+
+    from roguerglike_sidecar.events import Command, SetTargetPowerCommand
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    received: list[Command] = []
+
+    async def handler(cmd: Command) -> None:
+        received.append(cmd)
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18421, on_command=handler),
+        websockets.connect("ws://localhost:18421") as ws,
+    ):
+        await ws.send('{"type": "set_target_power", "watts": 235}')
+        # Give the recv loop a moment to dispatch
+        for _ in range(20):
+            if received:
+                break
+            await asyncio.sleep(0.05)
+
+    assert len(received) == 1
+    assert isinstance(received[0], SetTargetPowerCommand)
+    assert received[0].watts == 235
+
+
+async def test_inbound_malformed_command_is_dropped_without_killing_ws() -> None:
+    """Bad commands log + drop. The WS connection survives so subsequent
+    valid commands still dispatch."""
+    import websockets
+
+    from roguerglike_sidecar.events import Command, StopCommand
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    received: list[Command] = []
+
+    async def handler(cmd: Command) -> None:
+        received.append(cmd)
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18422, on_command=handler),
+        websockets.connect("ws://localhost:18422") as ws,
+    ):
+        # First message: garbage. Second: valid stop.
+        await ws.send("not-json-at-all")
+        await ws.send('{"type": "stop"}')
+        for _ in range(20):
+            if received:
+                break
+            await asyncio.sleep(0.05)
+
+    assert len(received) == 1
+    assert isinstance(received[0], StopCommand)
+
+
 async def test_latest_session_state_wins_on_replay() -> None:
     """If device_connected is emitted twice (e.g. reconnect), the late
     subscriber sees only the most recent."""

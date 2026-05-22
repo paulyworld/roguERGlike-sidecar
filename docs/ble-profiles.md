@@ -100,12 +100,41 @@ Implementation lives in `_resolve_drop_types` in `cli.py` (small pure
 function, easy to unit-test). It returns the `(bike_drops, hr_drops)` pair
 based on which devices are paired and the prefer-bike-hr flag.
 
+## Trainer control (write side)
+
+The FTMS bike profile also has a **control** surface, implemented in
+`ble/ftms_control.py` rather than the profile module itself (the profile
+stays a pure data decoder). The control client subscribes to indications
+on the Fitness Machine Control Point characteristic (`0x2AD9`) and sends
+opcodes for ERG-mode target wattage.
+
+- **Opt-in** via the CLI's `--allow-trainer-control` flag. Default off —
+  the sidecar is read-only by default; the rider isn't surprised by sudden
+  resistance.
+- **Aggressive defaults** when enabled (per project memory
+  `trainer-control-aggressive-defaults`): `--max-target-power 800`,
+  `--min-target-power 0` (free spin allowed), `--disconnect-bailout-s 10`.
+  The cap is high so it almost never fires; the engine WS disconnect
+  bailout stays on because that's a don't-burn-down-the-trainer concern
+  rather than a feel concern.
+- **Capability-gated** via the `device_capabilities` event. Engines should
+  only show ERG UI when `target_power: true`. The mock-mode device
+  advertises `target_power: true` so engine ERG code can be exercised
+  off-bike.
+
+See `docs/event-schema.md` for the full wire protocol: outbound events
+(`control_acquired`, `control_released`, `target_power_set`) and inbound
+commands (`set_target_power`, `start`, `stop`, `release_control`).
+
 ## Planned
 
 - **Cycling Speed and Cadence (CSCS)** — service `0x1816`. Some older smart
   trainers and power meters expose cadence here rather than via FTMS.
 - **Stride Sensor (RSC)** — service `0x1814`. Treadmill / footpod pace
   + cadence. Out of scope until a treadmill game is in design.
+- **FTMS SIM mode** — `Set Indoor Bike Simulation Parameters` (opcode 0x11).
+  Lets a game express grade/wind/CRR rather than target wattage; the
+  trainer feels like a hill. Gated on `indoor_bike_simulation: true`.
 
 ## Design constraints
 
