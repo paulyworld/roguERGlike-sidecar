@@ -158,6 +158,15 @@ class FtmsControl:
             log.exception("%s: error claiming control", self._device_name)
             return False
         self._is_controlling = True
+        # Explicit success log so operators don't have to infer control state
+        # from the absence of warnings. The KICKR's blue-LED state is a
+        # misleading proxy — it shows BLE GATT connection only, not FTMS
+        # control claim. This line is the authoritative "writes work now"
+        # signal in the sidecar log.
+        log.info(
+            "%s: claimed control — set_target_power now active",
+            self._device_name,
+        )
         await self._publish_control_acquired()
         # Restore previous target if we're reconnecting after a drop. Don't
         # blow up if the restore itself fails — the rider is here, not the

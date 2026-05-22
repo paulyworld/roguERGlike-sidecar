@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from typing import TYPE_CHECKING
 
 import click
@@ -129,6 +130,76 @@ async def _run_mock(
         await run_mock_loop(bus, state)
 
 
+DEFAULT_SCAN_TIMEOUT_S = 30.0
+
+
+def _resolve_matches(
+    discovered: dict[str, list[DiscoveredDevice]],
+    queries: dict[str, str],
+    *,
+    already: dict[str, DiscoveredDevice] | None = None,
+) -> tuple[dict[str, DiscoveredDevice], list[str]]:
+    """Match each user-supplied query against a scan result. Returns the
+    updated ``(matched, still_missing)`` pair where ``matched`` maps
+    profile_name → DiscoveredDevice and ``still_missing`` is the list of
+    profile names whose queries didn't match yet.
+
+    Queries already satisfied (in ``already``) are passed through unchanged
+    so re-scans don't re-match what's already been found."""
+    matched: dict[str, DiscoveredDevice] = dict(already or {})
+    missing: list[str] = []
+    for profile_name, query in queries.items():
+        if profile_name in matched:
+            continue
+        hit = _match_device(discovered.get(profile_name, []), query)
+        if hit is not None:
+            matched[profile_name] = hit
+        else:
+            missing.append(profile_name)
+    return matched, missing
+
+
+async def _scan_with_retry(
+    profiles: list[BleProfile],
+    queries: dict[str, str],
+    *,
+    total_timeout_s: float,
+    per_scan_timeout_s: float = 8.0,
+) -> dict[str, DiscoveredDevice] | None:
+    """Scan repeatedly until every query in ``queries`` matches a device, or
+    ``total_timeout_s`` elapses. Logs what's still missing between cycles so
+    the operator knows whether to wake a sleeping trainer or re-enable Whoop
+    broadcast mid-test. Returns ``None`` on timeout."""
+    deadline = time.monotonic() + max(total_timeout_s, per_scan_timeout_s)
+    matched: dict[str, DiscoveredDevice] = {}
+    attempt = 0
+    while True:
+        attempt += 1
+        log.info(
+            "scan attempt %d for %s ...",
+            attempt,
+            " + ".join(p.name for p in profiles),
+        )
+        discovered = await scan_for_profiles(profiles, timeout_s=per_scan_timeout_s)
+        matched, missing = _resolve_matches(discovered, queries, already=matched)
+        if not missing:
+            for name, device in matched.items():
+                log.info("matched %s → %s (%s)", name, device.name, device.address)
+            return matched
+        if time.monotonic() >= deadline:
+            click.echo(
+                f"scan timed out after {total_timeout_s:.0f}s; still waiting for: "
+                f"{', '.join(missing)}",
+                err=True,
+            )
+            return None
+        log.warning(
+            "still waiting for %s — will keep scanning (%.0fs left in window)",
+            ", ".join(missing),
+            deadline - time.monotonic(),
+        )
+
+
 async def _disconnect_bailout_watcher(
     bus: EventBus,
     sources: list[BleSource],
@@ -182,45 +253,27 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     cadence_bailout_s: float,
     target_power_ramp_s: float,
     rider_ftp: int | None,
+    scan_timeout_s: float,
 ) -> None:
     bus = EventBus()
     bike_profile = FtmsBikeProfile()
     hr_profile = HrsProfile()
 
     requested: list[BleProfile] = []
+    queries: dict[str, str] = {}  # profile_name -> user's --device-* query
     if device_bike is not None:
         requested.append(bike_profile)
+        queries[bike_profile.name] = device_bike
     if device_hr is not None:
         requested.append(hr_profile)
+        queries[hr_profile.name] = device_hr
 
-    log.info(
-        "scanning for %s ...",
-        " + ".join(p.name for p in requested),
-    )
-    discovered = await scan_for_profiles(requested)
+    matches = await _scan_with_retry(requested, queries, total_timeout_s=scan_timeout_s)
+    if matches is None:
+        sys.exit(1)
 
-    bike_match: DiscoveredDevice | None = None
-    hr_match: DiscoveredDevice | None = None
-
-    if device_bike is not None:
-        bike_match = _match_device(discovered[bike_profile.name], device_bike)
-        if bike_match is None:
-            click.echo(
-                f"no FTMS bike matched {device_bike!r}. Found: "
-                f"{[d.name for d in discovered[bike_profile.name]] or '(none)'}",
-                err=True,
-            )
-            sys.exit(1)
-
-    if device_hr is not None:
-        hr_match = _match_device(discovered[hr_profile.name], device_hr)
-        if hr_match is None:
-            click.echo(
-                f"no HR sensor matched {device_hr!r}. Found: "
-                f"{[d.name for d in discovered[hr_profile.name]] or '(none)'}",
-                err=True,
-            )
-            sys.exit(1)
+    bike_match: DiscoveredDevice | None = matches.get(bike_profile.name)
+    hr_match: DiscoveredDevice | None = matches.get(hr_profile.name)
 
     bike_drops, hr_drops = _resolve_drop_types(
         has_bike=bike_match is not None,
@@ -505,6 +558,18 @@ async def _run_scan() -> None:
         "used at all intensities."
     ),
 )
+@click.option(
+    "--scan-timeout-s",
+    type=float,
+    default=DEFAULT_SCAN_TIMEOUT_S,
+    show_default=True,
+    help=(
+        "Total seconds to keep retrying BLE scans before giving up. Each "
+        "scan attempt is ~8s; the sidecar prints what's still missing "
+        "between attempts so you can wake a sleeping trainer or re-enable "
+        "Whoop broadcast without having to re-launch the command."
+    ),
+)
 @click.option("--ws-port", type=int, default=WS_PORT, show_default=True)
 @click.option("--ui-port", type=int, default=UI_PORT, show_default=True)
 def main(  # noqa: PLR0913 — CLI fan-in
@@ -520,6 +585,7 @@ def main(  # noqa: PLR0913 — CLI fan-in
     cadence_bailout_s: float,
     target_power_ramp_s: float,
     rider_ftp: int | None,
+    scan_timeout_s: float,
     ws_port: int,
     ui_port: int,
 ) -> None:
@@ -566,6 +632,7 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     cadence_bailout_s=cadence_bailout_s,
                     target_power_ramp_s=target_power_ramp_s,
                     rider_ftp=rider_ftp,
+                    scan_timeout_s=scan_timeout_s,
                 )
             )
         return
