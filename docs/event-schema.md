@@ -161,3 +161,71 @@ bitmap (upper 4 bytes of `0x2ACC`); profiles without a feature characteristic
 Future trainer-control work (FTMS Control Point writes for ERG mode) is
 gated on `target_power`; SIM-mode control is gated on `indoor_bike_simulation`.
 Clients should treat unknown future flags as additive and not strict-validate.
+
+## Trainer control
+
+Trainer control (FTMS Control Point writes — ERG-mode target power) is
+opt-in via the sidecar's `--allow-trainer-control` flag. When enabled, the
+sidecar claims control of a connected FTMS bike at attach time (issues
+Request Control + Start, awaits acknowledgement, then publishes
+`control_acquired` so clients know commands will now have effect).
+
+### `control_acquired`
+```json
+{ "type": "control_acquired", "data": { "kind": "bike_trainer", "name": "KICKR CORE 8B2A" } }
+```
+
+### `control_released`
+Carries a `reason` field so the engine can distinguish graceful shutdowns
+from safety bailouts (`ws_disconnect_bailout`, etc.).
+```json
+{ "type": "control_released", "data": { "kind": "bike_trainer", "name": "KICKR CORE 8B2A", "reason": "stop" } }
+```
+
+### `target_power_set`
+Acknowledges (or rejects) a client `set_target_power` command. `watts` is
+the value actually sent to the trainer after sidecar-side clamping; for a
+rejected command it's the requested value with `accepted: false` and
+`reason` populated.
+```json
+{ "type": "target_power_set", "data": { "watts": 235, "accepted": true, "reason": "" } }
+```
+
+## Inbound commands (engine → sidecar)
+
+The WS connection is bidirectional. Clients send commands using a separate
+envelope shape (no `ts`/`seq`/`session_id` — the sidecar isn't logging
+inbound traffic into the event stream). Malformed messages are logged and
+dropped without affecting the outbound event flow.
+
+### `set_target_power`
+```json
+{ "type": "set_target_power", "watts": 235 }
+```
+Sidecar clamps `watts` to its configured `[--min-target-power,
+--max-target-power]` before writing the FTMS Set Target Power opcode. The
+outbound `target_power_set` acknowledges with the post-clamp value.
+
+### `start`
+```json
+{ "type": "start" }
+```
+Issues FTMS Start (opcode `0x07`) — enters active workout state. The
+sidecar already does this automatically at connect when
+`--allow-trainer-control` is set, so this command is mainly useful for
+re-acquiring after a `release_control`.
+
+### `stop`
+```json
+{ "type": "stop" }
+```
+Issues FTMS Stop (opcode `0x08`, stop subcode `0x01`). Releases the
+controlling state; the trainer goes back to passive telemetry.
+
+### `release_control`
+```json
+{ "type": "release_control" }
+```
+Same wire effect as `stop`, semantically distinct: the game is signaling
+that this session is done using trainer control. The sidecar publishes
+`control_released` with `reason: "requested"`.

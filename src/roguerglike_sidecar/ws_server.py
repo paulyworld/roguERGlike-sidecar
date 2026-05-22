@@ -1,24 +1,43 @@
-"""WebSocket broadcaster.
+"""WebSocket transport.
 
-A single producer (the mock loop, or later a BLE deriver) calls ``EventBus.publish``
-with an event ``data`` model and a type/device_kind; the bus wraps it in an
-``Envelope`` (assigning monotonic seq + ts + session_id) and fans it out to every
-connected client. The engine's ``effort_bridge.gd`` is one such client.
+Two flows on one connection:
+
+- **Outbound (sidecar → client):** events. A producer (mock loop, BLE source,
+  control client) calls ``EventBus.publish``; the bus wraps payloads in an
+  ``Envelope`` (monotonic seq + ts + session_id) and fans out to every
+  connected client.
+- **Inbound (client → sidecar):** commands. Each connection runs a receive
+  task that parses messages as :data:`events.Command` and hands them to an
+  optional ``on_command`` callback. Used by the engine to send Set Target
+  Power / Stop while the trainer is under sidecar control.
+
+If no ``on_command`` is configured, inbound messages are logged and dropped.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID, uuid4
 
 import websockets
+from pydantic import ValidationError
 from websockets.asyncio.server import ServerConnection, serve
 
-from .events import DeviceKind, Envelope, EventData, EventType, now_ts
+from .events import (
+    Command,
+    DeviceKind,
+    Envelope,
+    EventData,
+    EventType,
+    now_ts,
+    parse_command_json,
+)
+
+CommandHandler = Callable[[Command], Awaitable[None]]
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +102,15 @@ class EventBus:
                 log.warning("dropping event for slow subscriber")
         return env
 
+    @property
+    def subscriber_count(self) -> int:
+        """How many WS clients are currently subscribed. Used by the live
+        runner's disconnect-bailout watcher — when all clients drop while a
+        trainer is under our control, the runner waits a grace window then
+        issues Stop so the trainer doesn't keep holding the last target
+        indefinitely."""
+        return len(self._subscribers)
+
     @asynccontextmanager
     async def subscribe(self) -> AsyncIterator[asyncio.Queue[Envelope]]:
         q: asyncio.Queue[Envelope] = asyncio.Queue(maxsize=256)
@@ -96,15 +124,61 @@ class EventBus:
             self._subscribers.discard(q)
 
 
-async def _handle_client(connection: ServerConnection, bus: EventBus) -> None:
+async def _send_loop(
+    connection: ServerConnection,
+    queue: asyncio.Queue[Envelope],
+) -> None:
+    while True:
+        env = await queue.get()
+        await connection.send(env.to_wire())
+
+
+async def _recv_loop(
+    connection: ServerConnection,
+    on_command: CommandHandler | None,
+) -> None:
+    """Read inbound messages, validate as :data:`Command`, dispatch."""
+    async for message in connection:
+        if not isinstance(message, str):
+            log.warning("ignoring non-text WS frame")
+            continue
+        try:
+            command = parse_command_json(message)
+        except ValidationError as e:
+            log.warning("dropping malformed command: %s", e.errors()[0]["msg"] if e.errors() else e)
+            continue
+        if on_command is None:
+            log.warning("received command %s but no handler is configured", command.type)
+            continue
+        try:
+            await on_command(command)
+        except Exception:  # noqa: BLE001 — one bad command must not kill the WS
+            log.exception("error handling command %s", command.type)
+
+
+async def _handle_client(
+    connection: ServerConnection,
+    bus: EventBus,
+    on_command: CommandHandler | None,
+) -> None:
     peer = connection.remote_address
     log.info("client connected: %s", peer)
     async with bus.subscribe() as queue:
+        send = asyncio.create_task(_send_loop(connection, queue))
+        recv = asyncio.create_task(_recv_loop(connection, on_command))
         try:
-            while True:
-                env = await queue.get()
-                await connection.send(env.to_wire())
-        except websockets.ConnectionClosed:
+            # Either side ending (clean disconnect on recv, error on either)
+            # closes the whole client connection.
+            done, pending = await asyncio.wait({send, recv}, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, websockets.ConnectionClosed):
+                    log.exception(
+                        "client task ended with error", exc_info=(type(exc), exc, exc.__traceback__)
+                    )
+        finally:
             log.info("client disconnected: %s", peer)
 
 
@@ -114,11 +188,16 @@ async def run_ws_server(
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    on_command: CommandHandler | None = None,
 ) -> AsyncIterator[Any]:
-    """Start the WS server bound to ``bus``; yields the server until cancellation."""
+    """Start the WS server bound to ``bus``; yields the server until cancellation.
+
+    ``on_command``, if provided, is awaited once per validated inbound command
+    message. The handler is shared across all connected clients; if you need
+    per-client state, close over it before passing in."""
 
     async def handler(conn: ServerConnection) -> None:
-        await _handle_client(conn, bus)
+        await _handle_client(conn, bus, on_command)
 
     async with serve(handler, host, port) as server:
         log.info("sidecar WS listening on ws://%s:%d", host, port)
