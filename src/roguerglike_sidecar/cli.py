@@ -6,16 +6,35 @@ import asyncio
 import contextlib
 import logging
 import sys
+from typing import TYPE_CHECKING
 
 import click
 
 from .ble.ftms_bike import FtmsBikeProfile
+from .ble.ftms_control import FtmsControl
 from .ble.hrs import HrsProfile
 from .ble.profile import BleProfile
 from .ble.scan import DiscoveredDevice, scan_for_profiles
 from .ble.source import BleSource
-from .events import EventType
-from .mock import MockState, run_mock_loop
+
+if TYPE_CHECKING:
+    from bleak import BleakClient
+from .events import (
+    Command,
+    EventType,
+    ReleaseControlCommand,
+    SetTargetPowerCommand,
+    StartCommand,
+    StopCommand,
+    TargetPowerSetData,
+)
+from .mock import (
+    MockState,
+    mock_acquire_control,
+    mock_release_control,
+    mock_set_target_power,
+    run_mock_loop,
+)
 from .session import announce_session_start
 from .web_ui import DEFAULT_PORT as UI_PORT
 from .web_ui import run_web_ui
@@ -26,6 +45,15 @@ log = logging.getLogger(__name__)
 
 # Order matters for output and for the order ``--scan`` lists profiles.
 ALL_PROFILES: list[BleProfile] = [FtmsBikeProfile(), HrsProfile()]
+
+# Aggressive defaults per memory ``trainer-control-aggressive-defaults``:
+# permissive caps + free spin allowed; safety is opt-in via these flags
+# rather than opt-out padding. The disconnect-bailout grace window stays on
+# even with aggressive defaults — that's a don't-burn-down-the-trainer
+# concern, not a feel concern.
+DEFAULT_MAX_TARGET_POWER = 800
+DEFAULT_MIN_TARGET_POWER = 0
+DEFAULT_DISCONNECT_BAILOUT_S = 10.0
 
 
 def _match_device(devices: list[DiscoveredDevice], query: str) -> DiscoveredDevice | None:
@@ -62,18 +90,90 @@ def _resolve_drop_types(
     return frozenset(), frozenset()
 
 
-async def _run_mock(ws_port: int, ui_port: int) -> None:
+async def _run_mock(
+    ws_port: int,
+    ui_port: int,
+    *,
+    allow_trainer_control: bool,
+) -> None:
     bus = EventBus()
     state = MockState()
-    async with run_ws_server(bus, port=ws_port), run_web_ui(state, port=ui_port):
+
+    async def on_command(command: Command) -> None:
+        if isinstance(command, SetTargetPowerCommand):
+            await mock_set_target_power(bus, state, command.watts)
+        elif isinstance(command, StopCommand):
+            await state.stop_erg()
+            await mock_release_control(bus, "stop")
+        elif isinstance(command, ReleaseControlCommand):
+            await state.stop_erg()
+            await mock_release_control(bus, "requested")
+        elif isinstance(command, StartCommand):
+            await mock_acquire_control(bus)
+
+    handler = on_command if allow_trainer_control else None
+
+    async with (
+        run_ws_server(bus, port=ws_port, on_command=handler),
+        run_web_ui(state, port=ui_port),
+    ):
+        if allow_trainer_control:
+            # Mock auto-acquires (live mode does the same right after connect)
+            # so the engine sees control_acquired without having to issue Start.
+            await mock_acquire_control(bus)
         await run_mock_loop(bus, state)
 
 
-async def _run_live(
+async def _disconnect_bailout_watcher(
+    bus: EventBus,
+    sources: list[BleSource],
+    grace_s: float,
+) -> None:
+    """If every WS client drops while a bike is under our control, wait
+    ``grace_s`` and then release control. Cancels its own grace timer if a
+    client reconnects before the window expires.
+
+    Polls at 1 Hz — coarse, fine for a safety net. A more precise hook would
+    be a bus-level "subscribers_changed" signal, worth adding if we grow more
+    things that care about it."""
+    if grace_s <= 0:
+        return
+    armed_at: float | None = None
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(1.0)
+        any_controlling = any(s.control is not None and s.control.is_controlling for s in sources)
+        if bus.subscriber_count == 0 and any_controlling:
+            if armed_at is None:
+                armed_at = loop.time()
+                log.warning(
+                    "all WS clients disconnected while trainer is under control; "
+                    "issuing Stop in %.0fs unless a client reconnects",
+                    grace_s,
+                )
+            elif loop.time() - armed_at >= grace_s:
+                log.warning("disconnect bailout: releasing trainer control")
+                for s in sources:
+                    if s.control is not None and s.control.is_controlling:
+                        with contextlib.suppress(Exception):
+                            await s.control.release("ws_disconnect_bailout")
+                armed_at = None  # don't re-fire until conditions change
+        else:
+            if armed_at is not None:
+                log.info("client reconnected; bailout disarmed")
+            armed_at = None
+
+
+async def _run_live(  # noqa: PLR0913 — CLI fan-in
     ws_port: int,
     device_bike: str | None,
     device_hr: str | None,
     prefer_bike_hr: bool,
+    *,
+    allow_trainer_control: bool,
+    max_target_power: int,
+    min_target_power: int,
+    disconnect_bailout_s: float,
 ) -> None:
     bus = EventBus()
     bike_profile = FtmsBikeProfile()
@@ -120,18 +220,35 @@ async def _run_live(
         prefer_bike_hr=prefer_bike_hr,
     )
 
+    bike_source: BleSource | None = None
     sources: list[BleSource] = []
     if bike_match is not None:
         log.info("connecting to %s (%s)", bike_match.name, bike_match.address)
-        sources.append(
-            BleSource(
-                bike_profile,
-                bike_match.address,
-                bike_match.name,
+        # The control factory is closed over with the rider's safety bounds;
+        # the bike source invokes it post-connect once it has a live client.
+        bike_name = bike_match.name
+
+        async def _factory(client: BleakClient) -> FtmsControl | None:
+            if not allow_trainer_control:
+                return None
+            return FtmsControl(
+                client,
                 bus,
-                drop_event_types=bike_drops,
+                device_kind=bike_profile.device_kind,
+                device_name=bike_name,
+                max_watts=max_target_power,
+                min_watts=min_target_power,
             )
+
+        bike_source = BleSource(
+            bike_profile,
+            bike_match.address,
+            bike_match.name,
+            bus,
+            drop_event_types=bike_drops,
+            control_factory=_factory if allow_trainer_control else None,
         )
+        sources.append(bike_source)
     if hr_match is not None:
         log.info("connecting to %s (%s)", hr_match.name, hr_match.address)
         sources.append(
@@ -144,13 +261,51 @@ async def _run_live(
             )
         )
 
-    # session_start's device_kind reflects the primary source the engine
-    # should associate the session with. Bike if present, otherwise HR.
-    primary_kind = sources[0]._profile.device_kind  # noqa: SLF001 — own-package attr
+    # The command handler dispatches engine→sidecar commands to whichever
+    # source actually owns the trainer (currently only the bike).
+    async def on_command(command: Command) -> None:
+        if isinstance(command, SetTargetPowerCommand):
+            if bike_source is None or bike_source.control is None:
+                await bus.publish(
+                    type_="target_power_set",
+                    data=TargetPowerSetData(
+                        watts=command.watts,
+                        accepted=False,
+                        reason="no controllable bike",
+                    ),
+                    device_kind=bike_profile.device_kind,
+                )
+                return
+            await bike_source.control.set_target_power(command.watts)
+        elif isinstance(command, StopCommand):
+            if bike_source is not None and bike_source.control is not None:
+                await bike_source.control.stop()
+        elif isinstance(command, ReleaseControlCommand):
+            if bike_source is not None and bike_source.control is not None:
+                await bike_source.control.release("requested")
+        elif isinstance(command, StartCommand):
+            if (
+                bike_source is not None
+                and bike_source.control is not None
+                and not bike_source.control.is_controlling
+            ):
+                await bike_source.control.request_control_and_start()
 
-    async with run_ws_server(bus, port=ws_port):
+    primary_kind = sources[0]._profile.device_kind  # noqa: SLF001 — own-package attr
+    handler = on_command if allow_trainer_control else None
+
+    async with run_ws_server(bus, port=ws_port, on_command=handler):
         await announce_session_start(bus, primary_kind)
-        await asyncio.gather(*(s.run() for s in sources))
+        tasks = [asyncio.create_task(s.run()) for s in sources]
+        if allow_trainer_control:
+            tasks.append(
+                asyncio.create_task(_disconnect_bailout_watcher(bus, sources, disconnect_bailout_s))
+            )
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for t in tasks:
+                t.cancel()
 
 
 async def _run_scan() -> None:
@@ -211,14 +366,52 @@ async def _run_scan() -> None:
         "the standalone sensor."
     ),
 )
+@click.option(
+    "--allow-trainer-control",
+    is_flag=True,
+    help=(
+        "Opt in to trainer control (FTMS Control Point writes). When set, the "
+        "sidecar will Request Control + Start at connect, accept "
+        "set_target_power / stop / release_control commands over the WS, and "
+        "release control on shutdown. Default off."
+    ),
+)
+@click.option(
+    "--max-target-power",
+    type=int,
+    default=DEFAULT_MAX_TARGET_POWER,
+    show_default=True,
+    help="Maximum target power (watts) the sidecar will write to the trainer.",
+)
+@click.option(
+    "--min-target-power",
+    type=int,
+    default=DEFAULT_MIN_TARGET_POWER,
+    show_default=True,
+    help="Minimum target power (watts). 0 allows ERG free spin.",
+)
+@click.option(
+    "--disconnect-bailout-s",
+    type=float,
+    default=DEFAULT_DISCONNECT_BAILOUT_S,
+    show_default=True,
+    help=(
+        "If all WS clients disconnect while the trainer is under control, "
+        "wait this many seconds before issuing Stop. 0 disables the bailout."
+    ),
+)
 @click.option("--ws-port", type=int, default=WS_PORT, show_default=True)
 @click.option("--ui-port", type=int, default=UI_PORT, show_default=True)
-def main(
+def main(  # noqa: PLR0913 — CLI fan-in
     mode: str,
     scan_only: bool,
     device_bike: str | None,
     device_hr: str | None,
     prefer_bike_hr: bool,
+    allow_trainer_control: bool,
+    max_target_power: int,
+    min_target_power: int,
+    disconnect_bailout_s: float,
     ws_port: int,
     ui_port: int,
 ) -> None:
@@ -235,7 +428,13 @@ def main(
 
     if mode == "mock":
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(_run_mock(ws_port, ui_port))
+            asyncio.run(
+                _run_mock(
+                    ws_port,
+                    ui_port,
+                    allow_trainer_control=allow_trainer_control,
+                )
+            )
         return
 
     if mode == "live":
@@ -246,7 +445,18 @@ def main(
             )
             sys.exit(2)
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(_run_live(ws_port, device_bike, device_hr, prefer_bike_hr))
+            asyncio.run(
+                _run_live(
+                    ws_port,
+                    device_bike,
+                    device_hr,
+                    prefer_bike_hr,
+                    allow_trainer_control=allow_trainer_control,
+                    max_target_power=max_target_power,
+                    min_target_power=min_target_power,
+                    disconnect_bailout_s=disconnect_bailout_s,
+                )
+            )
         return
 
     click.echo(f"mode={mode!r} not yet implemented", err=True)
