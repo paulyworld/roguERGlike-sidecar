@@ -281,3 +281,61 @@ controlling state; the trainer goes back to passive telemetry.
 Same wire effect as `stop`, semantically distinct: the game is signaling
 that this session is done using trainer control. The sidecar publishes
 `control_released` with `reason: "requested"`.
+
+### `annotate`
+```json
+{
+  "type": "annotate",
+  "tag": "ui-pause",
+  "note": "between-round screen — not a real walk-away",
+  "client_id": "concert-mvp"
+}
+```
+Mark a moment on the event stream. Used by clients to capture rider
+intent or context that isn't otherwise visible in telemetry — F2-keypress
+bug reports, "this felt unfair" markers, manual phase boundaries during
+debugging. The sidecar republishes the payload as a `rider_annotation`
+envelope (see below) with its own `ts` and `seq` so timestamps stay
+monotonic with the rest of the stream.
+
+**Not gated on `--allow-trainer-control`.** Annotations never write to
+the trainer, so the sidecar accepts them in any launch configuration —
+including off-bike mock mode and live mode without trainer control.
+
+`tag` is required (1–64 chars, free-form); `note` (optional, ≤280 chars)
+and `client_id` (optional, ≤64 chars) supply additional context. Tags
+are intentionally not enum-constrained on the wire — different clients
+can converge on a shared vocabulary without the sidecar gatekeeping.
+Recommended vocabulary:
+
+| Tag | Meaning |
+|---|---|
+| `ui-pause` | Client is pausing for its own reasons (between rounds, between videos) — distinct from cadence bailout / walk-away |
+| `walk-away` | Rider actually stopped pedalling intentionally |
+| `bug` | Something visibly broke; `note` should explain |
+| `unfair` | Subjective: this section felt unreasonably hard / off-target |
+| `marker` | Generic timestamp marker for later analysis |
+
+## Client-originated events (annotations)
+
+### `rider_annotation`
+The sidecar's republishing of an inbound `annotate` command. Sidecar
+stamps `ts`/`seq`/`session_id` so the annotation is consistent with the
+rest of the stream and lands correctly in JSONL recordings.
+```json
+{
+  "type": "rider_annotation",
+  "ts": 1779560002.114,
+  "session_id": "5d5590b6-c10e-4ed0-a3d9-1f8074caa69b",
+  "seq": 508,
+  "device_kind": "client",
+  "data": {
+    "tag": "ui-pause",
+    "note": "between-round screen — not a real walk-away",
+    "client_id": "concert-mvp"
+  }
+}
+```
+The `device_kind` field is `"client"` rather than a hardware kind:
+annotations don't describe a device. This is the only event type that
+uses `"client"` today.

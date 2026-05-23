@@ -253,6 +253,68 @@ async def test_inbound_malformed_command_is_dropped_without_killing_ws() -> None
     assert isinstance(received[0], StopCommand)
 
 
+async def test_inbound_annotate_is_published_as_rider_annotation_envelope() -> None:
+    """An ``annotate`` command from a client is republished as a typed
+    ``rider_annotation`` envelope. Verifies the schema bridge: client speaks
+    "annotate", recorder + replay see "rider_annotation"."""
+    import websockets
+
+    from roguerglike_sidecar.events import Command, RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    received: list[Command] = []
+
+    async def handler(cmd: Command) -> None:
+        received.append(cmd)
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18423, on_command=handler),
+        websockets.connect("ws://localhost:18423") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send(
+            '{"type": "annotate", "tag": "ui-pause", '
+            '"note": "between-round screen", "client_id": "concert-mvp"}'
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert env.device_kind == "client"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "ui-pause"
+    assert env.data.note == "between-round screen"
+    assert env.data.client_id == "concert-mvp"
+    # Annotations bypass on_command — handler must not receive them, otherwise
+    # the CLI's trainer-control gate would accidentally see annotation traffic
+    # and the contract would be confused.
+    assert received == []
+
+
+async def test_inbound_annotate_works_without_trainer_control_handler() -> None:
+    """Annotations don't touch the trainer, so they must work even when the
+    sidecar was launched without ``--allow-trainer-control`` (i.e.
+    ``on_command is None``). This is the path concert-mvp uses for off-bike
+    mock-mode dev."""
+    import websockets
+
+    from roguerglike_sidecar.events import RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18424, on_command=None),
+        websockets.connect("ws://localhost:18424") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send('{"type": "annotate", "tag": "marker"}')
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "marker"
+
+
 async def test_latest_session_state_wins_on_replay() -> None:
     """If device_connected is emitted twice (e.g. reconnect), the late
     subscriber sees only the most recent."""

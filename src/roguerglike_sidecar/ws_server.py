@@ -28,11 +28,13 @@ from pydantic import ValidationError
 from websockets.asyncio.server import ServerConnection, serve
 
 from .events import (
+    AnnotateCommand,
     Command,
     DeviceKind,
     Envelope,
     EventData,
     EventType,
+    RiderAnnotationData,
     SetTargetPowerCommand,
     TargetPowerSetData,
     now_ts,
@@ -176,6 +178,24 @@ async def _send_loop(
         await connection.send(env.to_wire())
 
 
+async def _publish_annotation(bus: EventBus, command: AnnotateCommand) -> None:
+    """Republish an inbound annotate command as a ``rider_annotation`` envelope.
+
+    Always-on: annotations are inert with respect to the trainer (no FTMS
+    writes, no state change) so they don't need ``--allow-trainer-control``.
+    Handled at the WS layer rather than through ``on_command`` because the
+    transformation is purely schema-level and identical across mock/live."""
+    await bus.publish(
+        type_="rider_annotation",
+        data=RiderAnnotationData(
+            tag=command.tag,
+            note=command.note,
+            client_id=command.client_id,
+        ),
+        device_kind="client",
+    )
+
+
 async def _recv_loop(
     connection: ServerConnection,
     bus: EventBus,
@@ -183,7 +203,8 @@ async def _recv_loop(
 ) -> None:
     """Read inbound messages, validate as :data:`Command`, dispatch.
 
-    When ``on_command`` is None (the sidecar wasn't started with
+    Annotations bypass ``on_command`` and are published directly. For other
+    commands, when ``on_command`` is None (the sidecar wasn't started with
     ``--allow-trainer-control``), commands that have a paired ack event get
     an explicit rejection envelope so clients can distinguish "flag missing"
     from "device not present" from "trainer rejected". The previous
@@ -198,6 +219,9 @@ async def _recv_loop(
             command = parse_command_json(message)
         except ValidationError as e:
             log.warning("dropping malformed command: %s", e.errors()[0]["msg"] if e.errors() else e)
+            continue
+        if isinstance(command, AnnotateCommand):
+            await _publish_annotation(bus, command)
             continue
         if on_command is None:
             await _publish_no_handler_rejection(bus, command)

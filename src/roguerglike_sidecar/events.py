@@ -21,6 +21,10 @@ DeviceKind = Literal[
     "power_meter",
     "hr_sensor",
     "mock",
+    # Non-device source. Used for events that originate from a client
+    # (rider annotations, future client-side markers) and don't describe
+    # a piece of hardware.
+    "client",
 ]
 
 
@@ -148,6 +152,17 @@ class SessionEndData(_StrictModel):
     duration_s: float = Field(ge=0.0)
 
 
+class RiderAnnotationData(_StrictModel):
+    """Rider-initiated mark on the event stream. Tags are free-form (the
+    schema only constrains length) so different clients can converge on a
+    shared vocabulary without the sidecar gatekeeping. Recommended tags:
+    ``ui-pause``, ``walk-away``, ``bug``, ``unfair``, ``marker``."""
+
+    tag: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=280)
+    client_id: str | None = Field(default=None, max_length=64)
+
+
 EventType = Literal[
     "power",
     "cadence",
@@ -164,6 +179,7 @@ EventType = Literal[
     "cadence_bailout_disengaged",
     "session_start",
     "session_end",
+    "rider_annotation",
 ]
 
 EventData = (
@@ -182,6 +198,7 @@ EventData = (
     | CadenceBailoutDisengagedData
     | SessionStartData
     | SessionEndData
+    | RiderAnnotationData
 )
 
 
@@ -207,6 +224,7 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "cadence_bailout_disengaged": CadenceBailoutDisengagedData,
     "session_start": SessionStartData,
     "session_end": SessionEndData,
+    "rider_annotation": RiderAnnotationData,
 }
 
 
@@ -288,13 +306,31 @@ class ReleaseControlCommand(BaseModel):
     type: Literal["release_control"]
 
 
+class AnnotateCommand(BaseModel):
+    """Mark a moment on the event stream. Used by clients to capture rider
+    intent or context that isn't otherwise visible in telemetry (e.g.
+    F2-keypress bug reports, "this felt unfair" markers, manual phase
+    boundaries during debugging). The sidecar republishes the payload as a
+    ``rider_annotation`` envelope with its own ``ts`` so timestamps stay
+    monotonic with the rest of the stream. Not gated on
+    ``--allow-trainer-control``: annotations never touch the trainer."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["annotate"]
+    tag: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=280)
+    client_id: str | None = Field(default=None, max_length=64)
+
+
 Command = Annotated[
-    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand,
+    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand,
     Field(discriminator="type"),
 ]
 
 
-ParsedCommand = SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand
+ParsedCommand = (
+    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand
+)
 
 
 def parse_command_json(text: str) -> ParsedCommand:
