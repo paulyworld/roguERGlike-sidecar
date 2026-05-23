@@ -231,8 +231,71 @@ def test_rider_annotation_envelope_round_trip() -> None:
     parsed = Envelope.model_validate_json(env.to_wire())
     assert parsed == env
     assert isinstance(parsed.data, RiderAnnotationData)
+    # Optional fields not set on construction should be absent from the wire,
+    # not serialized as ``null``. Keeps recordings/replays compact and means
+    # post-ride analyzers don't have to special-case explicit-null vs absent.
     assert json.loads(env.to_wire())["data"] == {
         "tag": "bug",
         "note": "UI froze for 2s",
         "client_id": "concert-mvp",
     }
+
+
+def test_rider_annotation_envelope_with_client_time_and_context() -> None:
+    """Full hybrid schema: a tuning-feedback annotation with ride-state context."""
+    env = Envelope(
+        type="rider_annotation",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="client",
+        data=RiderAnnotationData(
+            tag="too-hard",
+            client_id="gizzERG",
+            client_time_s=2412.5,
+            context={
+                "profile_id": "king-gizzard-night-2",
+                "profile_version": "terrain-v0",
+                "mode": "terrain_erg",
+                "section": "Motor Spirit",
+                "target_watts": 228,
+                "power": 205,
+                "cadence": 71,
+                "hr": 154,
+                "wkg": 2.93,
+                "grade": 5.5,
+                "hardware_source": "trainer_power",
+            },
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    assert isinstance(parsed.data, RiderAnnotationData)
+    assert parsed.data.client_time_s == 2412.5
+    assert parsed.data.context is not None
+    assert parsed.data.context["mode"] == "terrain_erg"
+    assert parsed.data.context["target_watts"] == 228
+
+
+def test_parse_annotate_command_with_client_time_and_context() -> None:
+    cmd = parse_command_json(
+        '{"type": "annotate", "tag": "too-hard", "client_time_s": 2412.5, '
+        '"client_id": "gizzERG", '
+        '"context": {"mode": "terrain_erg", "grade": 5.5, "target_watts": 228}}'
+    )
+    assert isinstance(cmd, AnnotateCommand)
+    assert cmd.client_time_s == 2412.5
+    assert cmd.context == {"mode": "terrain_erg", "grade": 5.5, "target_watts": 228}
+
+
+def test_annotate_command_rejects_negative_client_time() -> None:
+    with pytest.raises(ValidationError):
+        parse_command_json('{"type": "annotate", "tag": "marker", "client_time_s": -1.0}')
+
+
+def test_annotate_command_accepts_empty_context() -> None:
+    """Empty dict is a valid context — represents 'no client state to share'.
+    Distinct from absent context (the field omitted entirely)."""
+    cmd = parse_command_json('{"type": "annotate", "tag": "marker", "context": {}}')
+    assert isinstance(cmd, AnnotateCommand)
+    assert cmd.context == {}

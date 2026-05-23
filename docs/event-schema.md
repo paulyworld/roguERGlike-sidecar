@@ -286,42 +286,94 @@ that this session is done using trainer control. The sidecar publishes
 ```json
 {
   "type": "annotate",
-  "tag": "ui-pause",
-  "note": "between-round screen — not a real walk-away",
-  "client_id": "concert-mvp"
+  "tag": "too-hard",
+  "note": "ramp came back too hot after the pause",
+  "client_id": "gizzERG",
+  "client_time_s": 2412.5,
+  "context": {
+    "profile_id": "king-gizzard-night-2",
+    "profile_version": "terrain-v0",
+    "mode": "terrain_erg",
+    "section": "Motor Spirit",
+    "target_watts": 228,
+    "power": 205,
+    "cadence": 71,
+    "hr": 154,
+    "wkg": 2.93,
+    "grade": 5.5,
+    "hardware_source": "trainer_power"
+  }
 }
 ```
 Mark a moment on the event stream. Used by clients to capture rider
 intent or context that isn't otherwise visible in telemetry — F2-keypress
-bug reports, "this felt unfair" markers, manual phase boundaries during
-debugging. The sidecar republishes the payload as a `rider_annotation`
-envelope (see below) with its own `ts` and `seq` so timestamps stay
-monotonic with the rest of the stream.
+tuning feedback ("too hard", "too easy", "bad sync"), bug reports,
+manual phase boundaries during debugging. The sidecar republishes the
+payload as a `rider_annotation` envelope (see below) with its own `ts`
+and `seq` so timestamps stay monotonic with the rest of the stream.
 
 **Not gated on `--allow-trainer-control`.** Annotations never write to
 the trainer, so the sidecar accepts them in any launch configuration —
 including off-bike mock mode and live mode without trainer control.
 
-`tag` is required (1–64 chars, free-form); `note` (optional, ≤280 chars)
-and `client_id` (optional, ≤64 chars) supply additional context. Tags
-are intentionally not enum-constrained on the wire — different clients
-can converge on a shared vocabulary without the sidecar gatekeeping.
-Recommended vocabulary:
+#### Fields
+
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `tag` | yes | string (1–64) | Short categorical label; free-form (see recommended vocabulary below) |
+| `note` | no | string (≤280) | Free-text rider note. Omitted from the wire when unset. |
+| `client_id` | no | string (≤64) | Which client UI sourced the annotation (e.g. `gizzERG`, `engine`). Omitted when unset. |
+| `client_time_s` | no | float (≥0) | Rider's video/workout position at the keypress. Distinct from the sidecar wall-clock `ts` — lets analyzers place markers on the ride timeline rather than the receipt timeline. Omitted when unset. |
+| `context` | no | object | Free-form pass-through blob; sidecar treats as opaque. See recommended shape below. Omitted when unset. |
+
+Tags are intentionally not enum-constrained on the wire — different
+clients can converge on a shared vocabulary without the sidecar
+gatekeeping.
+
+#### Recommended tag vocabulary
 
 | Tag | Meaning |
 |---|---|
+| `too-hard` | Section felt subjectively too hard for the rider |
+| `too-easy` | Section felt subjectively too easy |
+| `bad-sync` | Audio/video sync looks wrong (music behind/ahead of intensity profile) |
+| `false-intensity` | Profile says hard but the music feels easy here |
+| `missed-intensity` | Music feels hard but the profile is treating it as easy |
+| `cadence-mismatch` | Target cadence doesn't match what the section wants |
 | `ui-pause` | Client is pausing for its own reasons (between rounds, between videos) — distinct from cadence bailout / walk-away |
 | `walk-away` | Rider actually stopped pedalling intentionally |
 | `bug` | Something visibly broke; `note` should explain |
-| `unfair` | Subjective: this section felt unreasonably hard / off-target |
 | `marker` | Generic timestamp marker for later analysis |
+
+#### Recommended `context` shape
+
+The sidecar doesn't validate inside `context`; the shape below is a
+convention so clients and analyzers speak the same vocabulary. Include
+whatever fields the client has at hand; omit the rest.
+
+| Field | Meaning |
+|---|---|
+| `profile_id` | The ride profile being played (e.g. `king-gizzard-night-2`) |
+| `profile_version` | Version of that profile so leaderboards/ghosts compare like with like |
+| `mode` | Ride mode: `raw_feel`, `tempo_intervals`, `terrain_erg`, `terrain_sim`, etc. |
+| `video_id` | Source media id (YouTube id, file path, ...) |
+| `section` | Current song/section label |
+| `target_watts` | ERG target wattage at the moment of annotation |
+| `power`, `cadence`, `hr` | Most recent telemetry snapshot |
+| `wkg` | Power in watts per kg |
+| `grade` | Current virtual grade percent (terrain modes) |
+| `speed_kph` | Virtual or trainer-reported speed |
+| `distance_m`, `elevation_gain_m` | Accumulated distance/elevation for the ride |
+| `hardware_source` | `trainer_power` / `power_meter` / `estimated_power` / `mock` |
 
 ## Client-originated events (annotations)
 
 ### `rider_annotation`
 The sidecar's republishing of an inbound `annotate` command. Sidecar
 stamps `ts`/`seq`/`session_id` so the annotation is consistent with the
-rest of the stream and lands correctly in JSONL recordings.
+rest of the stream and lands correctly in JSONL recordings. Payload
+fields and recommended vocabulary mirror the `annotate` command above
+exactly — sidecar copies the rider-supplied fields through unchanged.
 ```json
 {
   "type": "rider_annotation",
@@ -330,12 +382,20 @@ rest of the stream and lands correctly in JSONL recordings.
   "seq": 508,
   "device_kind": "client",
   "data": {
-    "tag": "ui-pause",
-    "note": "between-round screen — not a real walk-away",
-    "client_id": "concert-mvp"
+    "tag": "too-hard",
+    "client_id": "gizzERG",
+    "client_time_s": 2412.5,
+    "context": {
+      "mode": "terrain_erg",
+      "grade": 5.5,
+      "section": "Motor Spirit",
+      "target_watts": 228
+    }
   }
 }
 ```
+Optional fields the rider didn't fill in are omitted from the wire
+(serialized with `exclude_none=true`), not present as explicit `null`s.
 The `device_kind` field is `"client"` rather than a hardware kind:
 annotations don't describe a device. This is the only event type that
 uses `"client"` today.

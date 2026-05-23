@@ -291,6 +291,39 @@ async def test_inbound_annotate_is_published_as_rider_annotation_envelope() -> N
     assert received == []
 
 
+async def test_inbound_annotate_passes_client_time_and_context_through() -> None:
+    """Hybrid-schema annotate command: client_time_s + context pass through
+    unchanged into the rider_annotation envelope. Sidecar treats context as
+    opaque — no validation inside the blob — so any client-supplied state
+    lands in the recording verbatim."""
+    import websockets
+
+    from roguerglike_sidecar.events import RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18425, on_command=None),
+        websockets.connect("ws://localhost:18425") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send(
+            '{"type": "annotate", "tag": "too-hard", '
+            '"client_time_s": 2412.5, "client_id": "gizzERG", '
+            '"context": {"mode": "terrain_erg", "grade": 5.5, '
+            '"target_watts": 228, "section": "Motor Spirit"}}'
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "too-hard"
+    assert env.data.client_time_s == 2412.5
+    assert env.data.context is not None
+    assert env.data.context["mode"] == "terrain_erg"
+    assert env.data.context["target_watts"] == 228
+
+
 async def test_inbound_annotate_works_without_trainer_control_handler() -> None:
     """Annotations don't touch the trainer, so they must work even when the
     sidecar was launched without ``--allow-trainer-control`` (i.e.

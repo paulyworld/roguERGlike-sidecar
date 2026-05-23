@@ -191,6 +191,8 @@ async def _publish_annotation(bus: EventBus, command: AnnotateCommand) -> None:
             tag=command.tag,
             note=command.note,
             client_id=command.client_id,
+            client_time_s=command.client_time_s,
+            context=command.context,
         ),
         device_kind="client",
     )
