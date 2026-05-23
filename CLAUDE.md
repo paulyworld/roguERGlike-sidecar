@@ -92,6 +92,12 @@ roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "mudrat" \
 # Mock mode with trainer control accepted — useful for engine ERG dev off-bike.
 roguerglike-sidecar --mode mock --allow-trainer-control
 
+# Record every published envelope to JSONL for post-ride analysis.
+# Includes the session-state replay so the file is self-contained.
+roguerglike-sidecar --mode live --device-bike "KICKR" --device-hr "mudrat" \
+    --allow-trainer-control --rider-ftp 250 \
+    --record docs/recordings/test.jsonl
+
 # Replay a recorded session  (NOT YET IMPLEMENTED — Phase 3)
 roguerglike-sidecar --mode replay --file rides/example.jsonl
 
