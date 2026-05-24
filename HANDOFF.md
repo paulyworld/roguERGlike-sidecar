@@ -2,13 +2,10 @@
 
 > Current state of this repo. Updated at the end of every session that touches it. Read first.
 
-**Last updated:** 2026-05-23
-**Last session log:** `../../docs/sessions/2026-05-22-first-live-ride-and-pause-architecture.md` (in umbrella)
-**Current branch:** `feat/rider-annotations`
-**Open PRs:**
-- `#21` `feat/record-flag` — first-class `--record` flag (live-validated; passes review-ready)
-- `feat/rider-annotations` — typed `annotate` command + `rider_annotation` envelope (this branch)
-**Current focus:** Two stacked alt-tracks landing today. `--record` was live-validated against the KICKR + concert-mvp ride. Annotations primitive built directly on top so a future concert-mvp F2 handler has a sidecar contract to send to — closes the "this bailout was a UI pause, not a walk-away" debugging gap surfaced on 2026-05-22.
+**Last updated:** 2026-05-23 (late)
+**Last session log:** `../../docs/sessions/2026-05-23-rebrand-and-annotations-end-to-end.md` (in umbrella)
+**Current branch:** `feat/hello-envelope`
+**Current focus:** Codex's sequence item #1 — `hello` envelope for protocol-version + capability advertisement. Sidecar now self-describes on every connection; clients can gate UI on declared features (`set_target_power`, `recording`, `annotations` advertised today). Sets the foundation for items #3 (Pattern B pause), #4 (distance + FIT), #5 (SIM mode) to advertise themselves as they ship.
 
 ## Where we are
 

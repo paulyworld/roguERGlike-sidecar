@@ -25,6 +25,10 @@ DeviceKind = Literal[
     # (rider annotations, future client-side markers) and don't describe
     # a piece of hardware.
     "client",
+    # Non-device source. Used for events the sidecar emits about itself
+    # (``hello`` protocol-version envelope, future ``server_status`` /
+    # heartbeat events).
+    "sidecar",
 ]
 
 
@@ -181,6 +185,33 @@ class RiderAnnotationData(_StrictModel):
     context: dict[str, object] | None = Field(default=None)
 
 
+class HelloData(_StrictModel):
+    """Sidecar self-describes on connect.
+
+    Replayed to every new subscriber via the session-state mechanism — a
+    client that connects mid-session still learns the protocol version,
+    the sidecar version, what features the sidecar supports, and which
+    mode it's running in. The combination of ``protocol_version`` and
+    ``features`` is the contract clients gate UI on (e.g. concert-mvp
+    enables F2 only when ``annotations`` is in ``features``).
+
+    ``protocol_version`` follows semver. Minor bumps add features
+    backward-compatibly; major bumps are breaking changes. Clients
+    seeing an unknown major version should surface a visible warning
+    rather than failing silently — the sidecar can't enforce that.
+
+    ``features`` is a list of stable strings. Each string declares the
+    sidecar's support for a protocol capability (not a hardware
+    capability — that's ``device_capabilities``). Adding a new feature
+    is a minor version bump; removing or renaming one is a major bump.
+    Recommended stable strings live in the schema doc."""
+
+    protocol_version: str = Field(min_length=1, max_length=32)
+    sidecar_version: str = Field(min_length=1, max_length=32)
+    features: list[str]
+    mode: Literal["mock", "live", "replay"]
+
+
 EventType = Literal[
     "power",
     "cadence",
@@ -198,6 +229,7 @@ EventType = Literal[
     "session_start",
     "session_end",
     "rider_annotation",
+    "hello",
 ]
 
 EventData = (
@@ -217,6 +249,7 @@ EventData = (
     | SessionStartData
     | SessionEndData
     | RiderAnnotationData
+    | HelloData
 )
 
 
@@ -243,6 +276,7 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "session_start": SessionStartData,
     "session_end": SessionEndData,
     "rider_annotation": RiderAnnotationData,
+    "hello": HelloData,
 }
 
 
