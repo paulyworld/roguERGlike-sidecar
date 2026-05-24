@@ -147,6 +147,42 @@ class CadenceBailoutDisengagedData(_StrictModel):
     ramped_over_s: float
 
 
+class PausedData(_StrictModel):
+    """Structured (client-driven) pause engaged. The sidecar has dropped the
+    trainer target to the easy-spin wattage supplied by the client (or the
+    sidecar's CLI default) and is holding it there until ``resume`` is
+    requested.
+
+    Distinct from ``cadence_bailout_engaged`` — that fires when the rider
+    has been off the bike past the intensity-aware threshold (safety);
+    this fires when a client explicitly issued ``pause`` (workout flow).
+    See ``docs/architecture/safety-vs-pause.md`` for the rationale.
+
+    During structured pause: cadence bailout is suspended (it won't
+    re-engage on top of the structured pause); inbound
+    ``set_target_power`` is queued (updates the resume target) and acked
+    with ``reason="deferred-paused"``."""
+
+    kind: DeviceKind
+    name: str
+    reason: str = ""
+    target_watts: int
+    previous_target_watts: int
+
+
+class ResumedData(_StrictModel):
+    """Structured (client-driven) resume completed. The trainer has
+    ramped back to ``restored_to_watts`` over ``ramped_over_s`` seconds.
+    Same shape as ``cadence_bailout_disengaged`` for consistency, but
+    distinct event type because the *trigger* was a client command, not
+    cadence return."""
+
+    kind: DeviceKind
+    name: str
+    restored_to_watts: int
+    ramped_over_s: float
+
+
 class SessionStartData(_StrictModel):
     session_id: UUID
 
@@ -226,6 +262,8 @@ EventType = Literal[
     "target_power_set",
     "cadence_bailout_engaged",
     "cadence_bailout_disengaged",
+    "paused",
+    "resumed",
     "session_start",
     "session_end",
     "rider_annotation",
@@ -246,6 +284,8 @@ EventData = (
     | TargetPowerSetData
     | CadenceBailoutEngagedData
     | CadenceBailoutDisengagedData
+    | PausedData
+    | ResumedData
     | SessionStartData
     | SessionEndData
     | RiderAnnotationData
@@ -273,6 +313,8 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "target_power_set": TargetPowerSetData,
     "cadence_bailout_engaged": CadenceBailoutEngagedData,
     "cadence_bailout_disengaged": CadenceBailoutDisengagedData,
+    "paused": PausedData,
+    "resumed": ResumedData,
     "session_start": SessionStartData,
     "session_end": SessionEndData,
     "rider_annotation": RiderAnnotationData,
@@ -385,14 +427,67 @@ class AnnotateCommand(BaseModel):
     context: dict[str, object] | None = Field(default=None)
 
 
+class PauseCommand(BaseModel):
+    """Client-driven structured pause (Pattern B).
+
+    The sidecar drops the trainer target to an easy-spin wattage and
+    suspends the cadence-bailout watcher until ``resume`` is requested.
+    Distinct from the cadence-driven safety bailout — see
+    ``docs/architecture/safety-vs-pause.md``.
+
+    ``reason`` is an optional short descriptor for logs / events / post-
+    ride analysis (e.g. ``"between-rounds"``, ``"intermission"``,
+    ``"structured_break"``). Free-form string; the sidecar passes it
+    through unchanged on the ``paused`` envelope.
+
+    ``target_watts`` is an optional explicit easy-spin override. If
+    omitted, the sidecar uses its CLI default (``--pause-easy-spin-pct-
+    ftp`` × ``--rider-ftp`` if available, otherwise the static fallback).
+
+    Repeated pause commands while already paused are idempotent — no new
+    ``paused`` envelope fires, but ``target_watts`` updates the current
+    easy-spin if supplied."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["pause"]
+    reason: str | None = Field(default=None, max_length=64)
+    target_watts: int | None = Field(default=None, ge=0, le=5000)
+
+
+class ResumeCommand(BaseModel):
+    """Client-driven structured resume. Counterpart to ``pause``.
+
+    The sidecar ramps the trainer target back to the pre-pause value
+    (or the latest target supplied via ``set_target_power`` during the
+    pause window) over the intensity-aware ramp duration. Cadence-bailout
+    watching re-engages once the ramp completes.
+
+    Idempotent: a resume when not paused is a no-op (no envelope fires)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["resume"]
+
+
 Command = Annotated[
-    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand,
+    SetTargetPowerCommand
+    | StartCommand
+    | StopCommand
+    | ReleaseControlCommand
+    | AnnotateCommand
+    | PauseCommand
+    | ResumeCommand,
     Field(discriminator="type"),
 ]
 
 
 ParsedCommand = (
-    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand
+    SetTargetPowerCommand
+    | StartCommand
+    | StopCommand
+    | ReleaseControlCommand
+    | AnnotateCommand
+    | PauseCommand
+    | ResumeCommand
 )
 
 

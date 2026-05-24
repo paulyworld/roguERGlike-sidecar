@@ -165,7 +165,7 @@ it's the sidecar describing itself. Distinct from `"client"` (used by
 | `set_target_power` | The `set_target_power` command (whether or not `--allow-trainer-control` is set; runtime gating surfaces via the `target_power_set` rejection ack) |
 | `recording` | The `--record <path>` CLI flag for in-process JSONL recording |
 | `annotations` | The `annotate` command + `rider_annotation` envelope |
-| `structured_pause` | The `pause` / `resume` commands + `paused` / `resumed` envelopes *(not yet shipped)* |
+| `structured_pause` | The `pause` / `resume` commands + `paused` / `resumed` envelopes |
 | `distance` | Derived `distance` events from FTMS `meters_total` *(not yet shipped)* |
 | `activity_export` | FIT / TCX / GPX export of completed sessions *(not yet shipped)* |
 | `indoor_bike_simulation` | FTMS Set Indoor Bike Simulation Parameters writes (grade, wind, rolling resistance) *(not yet shipped)* |
@@ -277,6 +277,54 @@ short bailout at high % FTP, longer at low (see project memory
 }
 ```
 
+### `paused` / `resumed` (structured pause — Pattern B)
+
+Client-driven pause / resume of the workout, distinct from the cadence-driven
+safety bailout above. See `docs/architecture/safety-vs-pause.md` for the full
+rationale; in short: cadence bailout is "rider walked away" (safety); structured
+pause is "the workout/UI is paused" (flow). Both can coexist — but structured
+pause suppresses cadence-bailout firing while it's active.
+
+```json
+{
+  "type": "paused",
+  "data": {
+    "kind": "bike_trainer",
+    "name": "KICKR CORE 8B2A",
+    "reason": "between-rounds",
+    "target_watts": 75,
+    "previous_target_watts": 210
+  }
+}
+```
+
+```json
+{
+  "type": "resumed",
+  "data": {
+    "kind": "bike_trainer",
+    "name": "KICKR CORE 8B2A",
+    "restored_to_watts": 210,
+    "ramped_over_s": 3.0
+  }
+}
+```
+
+| Field (`paused`) | Meaning |
+|---|---|
+| `reason` | Pass-through from the `pause` command (empty string if none supplied). For logs / post-ride analysis. |
+| `target_watts` | The easy-spin wattage the trainer was set to. Result of: command override → CLI `--pause-easy-spin-pct-ftp × --rider-ftp` → CLI `--pause-easy-spin-w` fallback, clamped to trainer min/max. |
+| `previous_target_watts` | Whatever the trainer was holding when the pause arrived — captured so resume knows what to restore to. If `set_target_power` is issued during the pause, this updates to the new value (the resume restores to the most recent intent). |
+
+| Field (`resumed`) | Meaning |
+|---|---|
+| `restored_to_watts` | Final wattage at the end of the ramp |
+| `ramped_over_s` | Ramp duration, intensity-aware per the same curve cadence-bailout uses |
+
+While structured-paused, `set_target_power` commands are queued (not written
+to the trainer) and acked with `target_power_set accepted=false
+reason="deferred-paused"`. The queued value becomes the new restore target.
+
 ### `cadence_bailout_disengaged`
 Cadence resumed; the sidecar has finished ramping the target back to the
 pre-pause value (or whatever the engine set via `set_target_power` during
@@ -331,6 +379,32 @@ controlling state; the trainer goes back to passive telemetry.
 Same wire effect as `stop`, semantically distinct: the game is signaling
 that this session is done using trainer control. The sidecar publishes
 `control_released` with `reason: "requested"`.
+
+### `pause` / `resume` (structured pause — Pattern B)
+```json
+{ "type": "pause", "reason": "between-rounds", "target_watts": 75 }
+{ "type": "resume" }
+```
+
+Client-driven workout pause. The sidecar drops the trainer target to the
+easy-spin wattage (`target_watts` if supplied, else CLI default), suspends
+the cadence-bailout watcher, and queues subsequent `set_target_power`
+writes as "deferred-paused" acks. `resume` ramps back to the pre-pause
+target (or the latest pending target supplied via `set_target_power`
+during the pause).
+
+| Field | Required | Notes |
+|---|---|---|
+| `reason` | no | Short descriptive tag (≤64 chars) for logs / events / post-ride analysis. Free-form; passes through unchanged on the `paused` envelope. |
+| `target_watts` | no | Explicit easy-spin override. If omitted, sidecar uses `--pause-easy-spin-pct-ftp × --rider-ftp` (when FTP is known) or `--pause-easy-spin-w` (when not). Clamped to trainer min/max before write. |
+
+Both commands are **idempotent**: a `pause` when already paused only
+updates the easy-spin (if `target_watts` is supplied); no second
+`paused` envelope fires. A `resume` when not paused is a silent no-op.
+
+Distinct from cadence-bailout safety pause: see
+`docs/architecture/safety-vs-pause.md`. The structured pause does NOT
+auto-resume on rider pedalling — only an explicit `resume` clears it.
 
 ### `annotate`
 ```json

@@ -18,8 +18,12 @@ from roguerglike_sidecar.events import (
     Envelope,
     HeartRateData,
     HelloData,
+    PauseCommand,
+    PausedData,
     PowerData,
     ReleaseControlCommand,
+    ResumeCommand,
+    ResumedData,
     RiderAnnotationData,
     SetTargetPowerCommand,
     StartCommand,
@@ -349,3 +353,104 @@ def test_hello_rejects_extra_fields() -> None:
             mode="mock",
             uptime_s=120.0,  # type: ignore[call-arg]
         )
+
+
+# --- structured pause (Pattern B): commands ----------------------------------
+
+
+def test_parse_pause_command_minimal() -> None:
+    cmd = parse_command_json('{"type": "pause"}')
+    assert isinstance(cmd, PauseCommand)
+    assert cmd.reason is None
+    assert cmd.target_watts is None
+
+
+def test_parse_pause_command_full() -> None:
+    cmd = parse_command_json('{"type": "pause", "reason": "between-rounds", "target_watts": 75}')
+    assert isinstance(cmd, PauseCommand)
+    assert cmd.reason == "between-rounds"
+    assert cmd.target_watts == 75
+
+
+def test_parse_pause_rejects_negative_watts() -> None:
+    with pytest.raises(ValidationError):
+        parse_command_json('{"type": "pause", "target_watts": -50}')
+
+
+def test_parse_pause_rejects_oversize_reason() -> None:
+    too_long = "x" * 65
+    with pytest.raises(ValidationError):
+        parse_command_json(f'{{"type": "pause", "reason": "{too_long}"}}')
+
+
+def test_parse_resume_command() -> None:
+    cmd = parse_command_json('{"type": "resume"}')
+    assert isinstance(cmd, ResumeCommand)
+
+
+def test_parse_resume_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        parse_command_json('{"type": "resume", "force": true}')
+
+
+# --- structured pause (Pattern B): envelopes ---------------------------------
+
+
+def test_paused_envelope_round_trip() -> None:
+    env = Envelope(
+        type="paused",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="bike_trainer",
+        data=PausedData(
+            kind="bike_trainer",
+            name="KICKR",
+            reason="between-rounds",
+            target_watts=75,
+            previous_target_watts=210,
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    assert isinstance(parsed.data, PausedData)
+    assert parsed.data.reason == "between-rounds"
+    assert parsed.data.target_watts == 75
+    assert parsed.data.previous_target_watts == 210
+
+
+def test_resumed_envelope_round_trip() -> None:
+    env = Envelope(
+        type="resumed",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="bike_trainer",
+        data=ResumedData(
+            kind="bike_trainer",
+            name="KICKR",
+            restored_to_watts=210,
+            ramped_over_s=3.0,
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    assert isinstance(parsed.data, ResumedData)
+    assert parsed.data.restored_to_watts == 210
+
+
+def test_paused_and_disengaged_have_distinct_event_types() -> None:
+    """``paused`` (structured) and ``cadence_bailout_engaged`` (safety) are
+    intentionally separate event types. Clients route them through
+    different UI paths even though the underlying mechanism (target drop)
+    is similar."""
+    paused = Envelope(
+        type="paused",
+        ts=1.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="bike_trainer",
+        data=PausedData(kind="bike_trainer", name="K", target_watts=75, previous_target_watts=200),
+    )
+    assert paused.type == "paused"
+    assert paused.type != "cadence_bailout_engaged"

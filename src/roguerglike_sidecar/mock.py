@@ -19,7 +19,9 @@ from .events import (
     DeviceConnectedData,
     DeviceKind,
     HeartRateData,
+    PausedData,
     PowerData,
+    ResumedData,
     TargetPowerSetData,
 )
 from .session import announce_session_start
@@ -132,6 +134,56 @@ async def mock_set_target_power(bus: EventBus, state: MockState, watts: int) -> 
     await bus.publish(
         type_="target_power_set",
         data=TargetPowerSetData(watts=applied, accepted=True),
+        device_kind=DEVICE_KIND,
+    )
+
+
+async def mock_structured_pause(
+    bus: EventBus,
+    state: MockState,
+    *,
+    easy_spin_watts: int,
+    previous_target_watts: int,
+    reason: str | None,
+) -> None:
+    """Apply a structured pause in mock mode. Sets the ERG target to the
+    easy-spin wattage and publishes the canonical ``paused`` envelope.
+
+    Mock has no cadence bailout, so the bookkeeping (previous target
+    tracking, idempotency) lives in the cli.py closure. This helper just
+    handles the state write + envelope publish."""
+    clamped = await state.set_erg_target_power(easy_spin_watts)
+    await bus.publish(
+        type_="paused",
+        data=PausedData(
+            kind=DEVICE_KIND,
+            name=DEVICE_NAME,
+            reason=reason or "",
+            target_watts=clamped,
+            previous_target_watts=previous_target_watts,
+        ),
+        device_kind=DEVICE_KIND,
+    )
+
+
+async def mock_structured_resume(
+    bus: EventBus,
+    state: MockState,
+    *,
+    restored_to_watts: int,
+) -> None:
+    """Apply a structured resume in mock mode. Restores the ERG target
+    immediately (no ramp — mock doesn't model intensity-aware ramping;
+    the ramp duration on the envelope is reported as 0.0)."""
+    clamped = await state.set_erg_target_power(restored_to_watts)
+    await bus.publish(
+        type_="resumed",
+        data=ResumedData(
+            kind=DEVICE_KIND,
+            name=DEVICE_NAME,
+            restored_to_watts=clamped,
+            ramped_over_s=0.0,
+        ),
         device_kind=DEVICE_KIND,
     )
 
