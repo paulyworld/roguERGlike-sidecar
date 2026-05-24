@@ -21,6 +21,10 @@ DeviceKind = Literal[
     "power_meter",
     "hr_sensor",
     "mock",
+    # Non-device source. Used for events that originate from a client
+    # (rider annotations, future client-side markers) and don't describe
+    # a piece of hardware.
+    "client",
 ]
 
 
@@ -148,6 +152,35 @@ class SessionEndData(_StrictModel):
     duration_s: float = Field(ge=0.0)
 
 
+class RiderAnnotationData(_StrictModel):
+    """Rider-initiated mark on the event stream. Tags are free-form (the
+    schema only constrains length) so different clients can converge on a
+    shared vocabulary without the sidecar gatekeeping. Recommended tags
+    cover three families: tuning feedback (``too-hard``, ``too-easy``,
+    ``bad-sync``, ``false-intensity``, ``missed-intensity``,
+    ``cadence-mismatch``); ride flow (``ui-pause``, ``walk-away``); and
+    catch-alls (``bug``, ``marker``).
+
+    ``client_time_s`` is the rider's video/workout position at the
+    keypress, distinct from the sidecar wall-clock ``ts``. Lets analyzers
+    position markers on the ride timeline rather than the receipt
+    timeline (which drifts on slow WS / buffering).
+
+    ``context`` is a free-form pass-through blob — the sidecar treats it
+    as opaque. Recommended fields by convention (clients should converge,
+    sidecar doesn't enforce): ``profile_id``, ``profile_version``,
+    ``mode`` (e.g. ``terrain_erg`` / ``terrain_sim`` / ``raw_feel``),
+    ``video_id``, ``section``, ``target_watts``, ``power``, ``cadence``,
+    ``hr``, ``wkg``, ``grade``, ``speed_kph``, ``distance_m``,
+    ``elevation_gain_m``, ``hardware_source``."""
+
+    tag: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=280)
+    client_id: str | None = Field(default=None, max_length=64)
+    client_time_s: float | None = Field(default=None, ge=0.0)
+    context: dict[str, object] | None = Field(default=None)
+
+
 EventType = Literal[
     "power",
     "cadence",
@@ -164,6 +197,7 @@ EventType = Literal[
     "cadence_bailout_disengaged",
     "session_start",
     "session_end",
+    "rider_annotation",
 ]
 
 EventData = (
@@ -182,6 +216,7 @@ EventData = (
     | CadenceBailoutDisengagedData
     | SessionStartData
     | SessionEndData
+    | RiderAnnotationData
 )
 
 
@@ -207,6 +242,7 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "cadence_bailout_disengaged": CadenceBailoutDisengagedData,
     "session_start": SessionStartData,
     "session_end": SessionEndData,
+    "rider_annotation": RiderAnnotationData,
 }
 
 
@@ -240,7 +276,13 @@ class Envelope(BaseModel):
         return values
 
     def to_wire(self) -> str:
-        return self.model_dump_json()
+        # ``exclude_none`` keeps optional fields off the wire when unset.
+        # Currently this matters for ``rider_annotation``'s ``note`` /
+        # ``client_id`` / ``client_time_s`` / ``context`` — clients shouldn't
+        # see explicit ``null``s for fields the rider didn't fill in. No
+        # other event types use ``None`` defaults today, so the behavior is
+        # narrow.
+        return self.model_dump_json(exclude_none=True)
 
 
 def now_ts() -> float:
@@ -288,13 +330,36 @@ class ReleaseControlCommand(BaseModel):
     type: Literal["release_control"]
 
 
+class AnnotateCommand(BaseModel):
+    """Mark a moment on the event stream. Used by clients to capture rider
+    intent or context that isn't otherwise visible in telemetry (e.g.
+    F2-keypress bug reports, "too hard" tuning feedback, manual phase
+    boundaries during debugging). The sidecar republishes the payload as
+    a ``rider_annotation`` envelope with its own ``ts`` so timestamps
+    stay monotonic with the rest of the stream. Not gated on
+    ``--allow-trainer-control``: annotations never touch the trainer.
+
+    See :class:`RiderAnnotationData` for the field semantics — this
+    command mirrors that shape exactly."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["annotate"]
+    tag: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=280)
+    client_id: str | None = Field(default=None, max_length=64)
+    client_time_s: float | None = Field(default=None, ge=0.0)
+    context: dict[str, object] | None = Field(default=None)
+
+
 Command = Annotated[
-    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand,
+    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand,
     Field(discriminator="type"),
 ]
 
 
-ParsedCommand = SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand
+ParsedCommand = (
+    SetTargetPowerCommand | StartCommand | StopCommand | ReleaseControlCommand | AnnotateCommand
+)
 
 
 def parse_command_json(text: str) -> ParsedCommand:

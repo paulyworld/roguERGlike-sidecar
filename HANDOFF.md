@@ -4,8 +4,11 @@
 
 **Last updated:** 2026-05-23
 **Last session log:** `../../docs/sessions/2026-05-22-first-live-ride-and-pause-architecture.md` (in umbrella)
-**Current branch:** `feat/record-flag`
-**Current focus:** **Full trainer-control loop validated end-to-end against the KICKR + Whoop.** All three bailout-related bugs shipped and confirmed working in a real ride. Today: first-class `--record` flag landing; semantic annotations primitive being planned next; then engine-side pause command (Pattern B) when engine #4 is promoted.
+**Current branch:** `feat/rider-annotations`
+**Open PRs:**
+- `#21` `feat/record-flag` — first-class `--record` flag (live-validated; passes review-ready)
+- `feat/rider-annotations` — typed `annotate` command + `rider_annotation` envelope (this branch)
+**Current focus:** Two stacked alt-tracks landing today. `--record` was live-validated against the KICKR + concert-mvp ride. Annotations primitive built directly on top so a future concert-mvp F2 handler has a sidecar contract to send to — closes the "this bailout was a UI pause, not a walk-away" debugging gap surfaced on 2026-05-22.
 
 ## Where we are
 
@@ -31,12 +34,12 @@ Validated against a Wahoo KICKR CORE 1003 + Whoop MG5. Three concurrent sources 
 
 ## What's next (immediate)
 
-1. **Pattern B pause primitive** (when engine asks for it). Small: new `PauseCommand` / `ResumeCommand` discriminated-union pair in `events.py`; handler in `cli.py` + `mock.py` that toggles `CadenceBailout.set_paused(...)` and optionally sets a configurable easy-spin wattage; typed `paused` / `resumed` envelopes. `CadenceBailout` already has internal `_paused` plumbing — wire to it.
-2. **Distance deriver** on `feat/distance-deriver`. FTMS Indoor Bike Data carries `meters_total`; small stateful module tracks `last_total → meters_delta` per session and emits `DistanceData` events.
-3. **CSCS profile** on `feat/ble-cscs`. Cycling Speed and Cadence Service (0x1816) for older trainers / power meters that expose cadence outside FTMS. Same shape as HRS.
-4. ~~First-class `--record <path>` flag on the CLI~~ — landed on `feat/record-flag`. `scripts/record_session.py` + `record-session.ps1` removed. `run-live-test.ps1` gained `-Record` / `-RecordPath`.
-
-5. **Semantic annotations (`RiderAnnotation` event + `annotate` command).** New typed command/envelope pair so clients (concert-mvp first via F2) can mark moments during a ride — "ui-pause", "felt-unfair", "bug-here". Persists alongside telemetry in the same JSONL, with sidecar `ts`, so post-ride debugging of bailout/pause becomes self-annotating. See umbrella session log for the design rationale.
+1. ~~First-class `--record <path>` flag~~ — done on PR #21 (`feat/record-flag`). Live-validated against KICKR; 3391-event ride captured cleanly. Awaiting merge.
+2. ~~Semantic annotations primitive~~ — done on `feat/rider-annotations` (this branch). 120/120 tests; new `annotate` inbound command + `rider_annotation` outbound envelope; `device_kind="client"` added for non-device-sourced events. Schema docs updated. Push + PR pending.
+3. **Concert-mvp F2 handler** — sister PR in `repos/concert-mvp`. Catches F2 in the browser, shows small overlay with preset tag hotkeys, sends `{"type":"annotate","tag":...}` over the existing WS. Validates the contract end-to-end.
+4. **Pattern B pause primitive** (when engine PR #4 is promoted). New `PauseCommand` / `ResumeCommand` pair; handler toggles `CadenceBailout.set_paused(...)` + sets configurable easy-spin wattage; typed `paused` / `resumed` envelopes. `CadenceBailout` already has internal `_paused` plumbing — wire to it.
+5. **Distance deriver** on `feat/distance-deriver`. FTMS Indoor Bike Data carries `meters_total`; small stateful module tracks `last_total → meters_delta` per session and emits `DistanceData` events.
+6. **CSCS profile** on `feat/ble-cscs`. Cycling Speed and Cadence Service (0x1816) for older trainers / power meters that expose cadence outside FTMS. Same shape as HRS.
 
 Other candidates (non-blocking):
 
@@ -55,18 +58,18 @@ Other candidates (non-blocking):
 ## How to test live
 
 ```powershell
-# Sidecar with built-in JSONL recording (single command — no second terminal needed)
-./scripts/run-live-test.ps1 -Record                          # auto-stamped path under docs/recordings/
-./scripts/run-live-test.ps1 -RecordPath rides/hiit-test.jsonl
-
-# Other variants
-./scripts/run-live-test.ps1                                  # defaults: KICKR + mudrat + FTP 250 + scan 60s + ERG control
+# Terminal 1 — sidecar
+./scripts/run-live-test.ps1                      # defaults: KICKR + mudrat + FTP 250 + scan 60s + ERG control
 ./scripts/run-live-test.ps1 -RiderFtp 275
-./scripts/run-live-test.ps1 -Mock                            # off-bike dev path
+./scripts/run-live-test.ps1 -Mock                # off-bike dev path
+
+# Terminal 2 — capture telemetry to JSONL
+./scripts/record-session.ps1                                # default: docs/recordings/YYYYMMDD_HHMMSS.jsonl
+./scripts/record-session.ps1 -OutputName "hiit-test"        # adds slug
 ```
 
 Success markers in the sidecar log (in order): `matched FTMS Bike → ...` / `matched HR Sensor → ...` → `device_connected ...` → `device_capabilities supports_target_power=true` → `<device>: claimed control — set_target_power now active` → `target_power_set accepted=true` once the engine writes.
 
 ## Entry point for next session
 
-> "`--record` flag shipped (feat/record-flag); replaces the external WS-subscriber recorder. Next track is the semantic-annotations primitive (`RiderAnnotation` event + `annotate` command) — small contract addition, validates the F2 mid-ride annotation UX on concert-mvp afterward. Alt tracks still open: Pattern B pause command (gated on engine #4 promotion), distance deriver, CSCS profile."
+> "Two PRs in flight: `--record` flag (#21, live-validated) and rider annotations (`feat/rider-annotations`, 120/120 tests, schema doc updated). Once both merge, concert-mvp gets an F2 handler that sends `{type:'annotate', tag:'ui-pause'|'walk-away'|...}` to validate the contract end-to-end. After that, Pattern B pause command becomes interesting again (gated on engine PR #4 promotion). Side-tracks: distance deriver, CSCS profile."

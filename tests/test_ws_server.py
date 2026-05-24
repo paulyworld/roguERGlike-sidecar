@@ -253,6 +253,101 @@ async def test_inbound_malformed_command_is_dropped_without_killing_ws() -> None
     assert isinstance(received[0], StopCommand)
 
 
+async def test_inbound_annotate_is_published_as_rider_annotation_envelope() -> None:
+    """An ``annotate`` command from a client is republished as a typed
+    ``rider_annotation`` envelope. Verifies the schema bridge: client speaks
+    "annotate", recorder + replay see "rider_annotation"."""
+    import websockets
+
+    from roguerglike_sidecar.events import Command, RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    received: list[Command] = []
+
+    async def handler(cmd: Command) -> None:
+        received.append(cmd)
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18423, on_command=handler),
+        websockets.connect("ws://localhost:18423") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send(
+            '{"type": "annotate", "tag": "ui-pause", '
+            '"note": "between-round screen", "client_id": "concert-mvp"}'
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert env.device_kind == "client"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "ui-pause"
+    assert env.data.note == "between-round screen"
+    assert env.data.client_id == "concert-mvp"
+    # Annotations bypass on_command — handler must not receive them, otherwise
+    # the CLI's trainer-control gate would accidentally see annotation traffic
+    # and the contract would be confused.
+    assert received == []
+
+
+async def test_inbound_annotate_passes_client_time_and_context_through() -> None:
+    """Hybrid-schema annotate command: client_time_s + context pass through
+    unchanged into the rider_annotation envelope. Sidecar treats context as
+    opaque — no validation inside the blob — so any client-supplied state
+    lands in the recording verbatim."""
+    import websockets
+
+    from roguerglike_sidecar.events import RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18425, on_command=None),
+        websockets.connect("ws://localhost:18425") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send(
+            '{"type": "annotate", "tag": "too-hard", '
+            '"client_time_s": 2412.5, "client_id": "gizzERG", '
+            '"context": {"mode": "terrain_erg", "grade": 5.5, '
+            '"target_watts": 228, "section": "Motor Spirit"}}'
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "too-hard"
+    assert env.data.client_time_s == 2412.5
+    assert env.data.context is not None
+    assert env.data.context["mode"] == "terrain_erg"
+    assert env.data.context["target_watts"] == 228
+
+
+async def test_inbound_annotate_works_without_trainer_control_handler() -> None:
+    """Annotations don't touch the trainer, so they must work even when the
+    sidecar was launched without ``--allow-trainer-control`` (i.e.
+    ``on_command is None``). This is the path concert-mvp uses for off-bike
+    mock-mode dev."""
+    import websockets
+
+    from roguerglike_sidecar.events import RiderAnnotationData
+    from roguerglike_sidecar.ws_server import run_ws_server
+
+    bus = EventBus()
+    async with (
+        run_ws_server(bus, host="localhost", port=18424, on_command=None),
+        websockets.connect("ws://localhost:18424") as ws,
+        bus.subscribe() as q,
+    ):
+        await ws.send('{"type": "annotate", "tag": "marker"}')
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "rider_annotation"
+    assert isinstance(env.data, RiderAnnotationData)
+    assert env.data.tag == "marker"
+
+
 async def test_latest_session_state_wins_on_replay() -> None:
     """If device_connected is emitted twice (e.g. reconnect), the late
     subscriber sees only the most recent."""
