@@ -28,6 +28,7 @@ from .events import (
     PauseCommand,
     ReleaseControlCommand,
     ResumeCommand,
+    SetSimulationCommand,
     SetTargetPowerCommand,
     StartCommand,
     StopCommand,
@@ -37,6 +38,7 @@ from .mock import (
     MockState,
     mock_acquire_control,
     mock_release_control,
+    mock_set_simulation,
     mock_set_target_power,
     mock_structured_pause,
     mock_structured_resume,
@@ -199,6 +201,14 @@ async def _run_mock(
             restore_to = mock_pre_pause_target if mock_pre_pause_target is not None else 0
             mock_pre_pause_target = None
             await mock_structured_resume(bus, state, restored_to_watts=restore_to)
+        elif isinstance(command, SetSimulationCommand):
+            await mock_set_simulation(
+                bus,
+                grade_percent=command.grade_percent,
+                wind_speed_mps=command.wind_speed_mps,
+                rolling_resistance=command.rolling_resistance,
+                wind_resistance=command.wind_resistance,
+            )
 
     handler = on_command if allow_trainer_control else None
 
@@ -484,6 +494,32 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
                 log.warning("resume command received but no bailout/control is bound yet")
                 return
             await bailout_for_bike.structured_resume()
+        elif isinstance(command, SetSimulationCommand):
+            if bike_source is None or bike_source.control is None:
+                # Mirror the set_target_power "no controllable bike" path —
+                # publish a typed rejection so clients can tell "no trainer"
+                # from "trainer rejected".
+                from .events import SimulationSetData
+
+                await bus.publish(
+                    type_="simulation_set",
+                    data=SimulationSetData(
+                        grade_percent=command.grade_percent,
+                        wind_speed_mps=command.wind_speed_mps,
+                        rolling_resistance=command.rolling_resistance,
+                        wind_resistance=command.wind_resistance,
+                        accepted=False,
+                        reason="no controllable bike",
+                    ),
+                    device_kind=bike_profile.device_kind,
+                )
+                return
+            await bike_source.control.set_simulation(
+                grade_percent=command.grade_percent,
+                wind_speed_mps=command.wind_speed_mps,
+                rolling_resistance=command.rolling_resistance,
+                wind_resistance=command.wind_resistance,
+            )
 
     primary_kind = sources[0]._profile.device_kind  # noqa: SLF001 — own-package attr
     handler = on_command if allow_trainer_control else None

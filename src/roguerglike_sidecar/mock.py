@@ -22,6 +22,7 @@ from .events import (
     PausedData,
     PowerData,
     ResumedData,
+    SimulationSetData,
     TargetPowerSetData,
 )
 from .session import announce_session_start
@@ -161,6 +162,30 @@ async def mock_structured_pause(
             reason=reason or "",
             target_watts=clamped,
             previous_target_watts=previous_target_watts,
+        ),
+        device_kind=DEVICE_KIND,
+    )
+
+
+async def mock_set_simulation(
+    bus: EventBus,
+    *,
+    grade_percent: float,
+    wind_speed_mps: float,
+    rolling_resistance: float,
+    wind_resistance: float,
+) -> None:
+    """Mock equivalent of FtmsControl.set_simulation. Always accepts (mock
+    has no physics model behind it; the envelope is the observable).
+    Useful for engine/client dev of SIM-mode UI without hardware."""
+    await bus.publish(
+        type_="simulation_set",
+        data=SimulationSetData(
+            grade_percent=grade_percent,
+            wind_speed_mps=wind_speed_mps,
+            rolling_resistance=rolling_resistance,
+            wind_resistance=wind_resistance,
+            accepted=True,
         ),
         device_kind=DEVICE_KIND,
     )

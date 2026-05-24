@@ -439,6 +439,100 @@ def test_resumed_envelope_round_trip() -> None:
     assert parsed.data.restored_to_watts == 210
 
 
+# --- SIM mode (Pattern B): commands + envelope ----------------------------
+
+
+def test_parse_set_simulation_command_minimal() -> None:
+    """Only grade_percent is required; defaults match the Zwift/TrainerRoad
+    'typical road bike' convention."""
+    from roguerglike_sidecar.events import SetSimulationCommand
+
+    cmd = parse_command_json('{"type": "set_simulation", "grade_percent": 4.5}')
+    assert isinstance(cmd, SetSimulationCommand)
+    assert cmd.grade_percent == 4.5
+    assert cmd.wind_speed_mps == 0.0
+    assert cmd.rolling_resistance == 0.004
+    assert cmd.wind_resistance == 0.51
+
+
+def test_parse_set_simulation_command_full() -> None:
+    from roguerglike_sidecar.events import SetSimulationCommand
+
+    cmd = parse_command_json(
+        '{"type": "set_simulation", "grade_percent": -2.0, '
+        '"wind_speed_mps": 3.5, "rolling_resistance": 0.008, '
+        '"wind_resistance": 0.42}'
+    )
+    assert isinstance(cmd, SetSimulationCommand)
+    assert cmd.grade_percent == -2.0
+    assert cmd.wind_speed_mps == 3.5
+    assert cmd.rolling_resistance == 0.008
+    assert cmd.wind_resistance == 0.42
+
+
+def test_set_simulation_bounds_reject_garbage() -> None:
+    """Each field's bound is the FTMS spec's encodable range (or tighter
+    for grade — ±100% is more than any real ride needs)."""
+    with pytest.raises(ValidationError):
+        parse_command_json('{"type": "set_simulation", "grade_percent": 200.0}')
+    with pytest.raises(ValidationError):
+        parse_command_json(
+            '{"type": "set_simulation", "grade_percent": 0.0, "rolling_resistance": 0.5}'
+        )
+    with pytest.raises(ValidationError):
+        parse_command_json(
+            '{"type": "set_simulation", "grade_percent": 0.0, "wind_resistance": 10.0}'
+        )
+
+
+def test_simulation_set_envelope_round_trip() -> None:
+    from roguerglike_sidecar.events import SimulationSetData
+
+    env = Envelope(
+        type="simulation_set",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="bike_trainer",
+        data=SimulationSetData(
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+            accepted=True,
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    assert isinstance(parsed.data, SimulationSetData)
+    assert parsed.data.grade_percent == 4.5
+    assert parsed.data.accepted is True
+
+
+def test_simulation_set_rejected_carries_reason() -> None:
+    from roguerglike_sidecar.events import SimulationSetData
+
+    env = Envelope(
+        type="simulation_set",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="bike_trainer",
+        data=SimulationSetData(
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+            accepted=False,
+            reason="device does not support indoor bike simulation",
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert isinstance(parsed.data, SimulationSetData)
+    assert parsed.data.accepted is False
+    assert "indoor bike simulation" in parsed.data.reason
+
+
 def test_paused_and_disengaged_have_distinct_event_types() -> None:
     """``paused`` (structured) and ``cadence_bailout_engaged`` (safety) are
     intentionally separate event types. Clients route them through

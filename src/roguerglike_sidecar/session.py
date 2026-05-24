@@ -25,6 +25,7 @@ _BASE_FEATURES: tuple[str, ...] = (
     "structured_pause",
     "distance",
     "activity_export",
+    "indoor_bike_simulation",
 )
 
 

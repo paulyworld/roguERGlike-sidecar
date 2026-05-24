@@ -215,7 +215,7 @@ it's the sidecar describing itself. Distinct from `"client"` (used by
 | `structured_pause` | The `pause` / `resume` commands + `paused` / `resumed` envelopes |
 | `distance` | `distance` + `elevation` events with `source` attribution (`trainer`/`synthetic`/`gps`) |
 | `activity_export` | FIT export of completed sessions via the `roguerglike-export` CLI |
-| `indoor_bike_simulation` | FTMS Set Indoor Bike Simulation Parameters writes (grade, wind, rolling resistance) *(not yet shipped)* |
+| `indoor_bike_simulation` | The `set_simulation` command — FTMS Set Indoor Bike Simulation Parameters writes (grade, wind, rolling resistance). Sidecar advertises the protocol capability; clients must also check `device_capabilities.indoor_bike_simulation` for the connected trainer. |
 
 A feature in this list means *the sidecar will accept and respond to
 the relevant commands*. It does **not** mean the connected hardware
@@ -300,6 +300,26 @@ rejected command it's the requested value with `accepted: false` and
 
 ```json
 { "type": "target_power_set", "data": { "watts": 235, "accepted": true, "reason": "" } }
+```
+
+### `simulation_set`
+Acknowledges (or rejects) a client `set_simulation` command. Echoed
+fields reflect the values sent to the trainer. See the inbound
+`set_simulation` command docs above for the full list of rejection
+reasons. Same `accepted` / `reason` pattern as `target_power_set`.
+
+```json
+{
+  "type": "simulation_set",
+  "data": {
+    "grade_percent": 4.5,
+    "wind_speed_mps": 0.0,
+    "rolling_resistance": 0.004,
+    "wind_resistance": 0.51,
+    "accepted": true,
+    "reason": ""
+  }
+}
 ```
 
 ### `cadence_bailout_engaged`
@@ -426,6 +446,54 @@ controlling state; the trainer goes back to passive telemetry.
 Same wire effect as `stop`, semantically distinct: the game is signaling
 that this session is done using trainer control. The sidecar publishes
 `control_released` with `reason: "requested"`.
+
+### `set_simulation`
+```json
+{
+  "type": "set_simulation",
+  "grade_percent": 4.5,
+  "wind_speed_mps": 0.0,
+  "rolling_resistance": 0.004,
+  "wind_resistance": 0.51
+}
+```
+FTMS Set Indoor Bike Simulation Parameters (opcode `0x11`). The
+trainer adjusts its physics model so resistance corresponds to riding
+up/down the given grade with the given headwind / rolling resistance /
+aerodynamic drag. Rider controls power by gear + cadence — inverse of
+ERG mode.
+
+Used by SIM Terrain mode (gizzERG) and future route-replay modes.
+
+| Field | Required | Notes |
+|---|---|---|
+| `grade_percent` | yes | ±100% (FTMS encodes ±327.67%, capped here at the physically plausible range) |
+| `wind_speed_mps` | no | Default 0.0. Positive = headwind. FTMS range ±32.767 m/s. |
+| `rolling_resistance` | no | Default 0.004 (typical road tires per Zwift/TrainerRoad). FTMS range [0, 0.0255]. |
+| `wind_resistance` | no | Default 0.51 (typical road position per Zwift/TrainerRoad). FTMS range [0, 2.55]. |
+
+**Gated on three things** — clients should check all before showing
+SIM-mode UI:
+
+1. Sidecar startup with `--allow-trainer-control`
+2. `indoor_bike_simulation` in the `hello` envelope's features
+3. `device_capabilities.indoor_bike_simulation` for the connected trainer
+
+If any are missing, the sidecar publishes `simulation_set
+accepted=false` with a typed `reason` so the client can distinguish:
+
+- `"no controllable bike"` — no FTMS bike attached
+- `"not controlling"` — trainer control not claimed yet
+- `"trainer rejected (0xNN)"` — trainer responded with a non-success code
+  (e.g. `0x05` = Op Code Not Supported, despite the feature flag claim)
+- `"indication timeout"` / `"ble error: ..."` — wire-layer failure
+
+The successful ack (`simulation_set accepted=true`) echoes back the
+exact values sent to the trainer.
+
+Switching between SIM and ERG mid-ride: just stop sending one and start
+sending the other. The trainer holds whatever mode it was most recently
+asked for. No explicit "switch mode" command.
 
 ### `pause` / `resume` (structured pause — Pattern B)
 ```json

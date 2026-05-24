@@ -10,6 +10,7 @@ from roguerglike_sidecar.mock import (
     MockState,
     mock_acquire_control,
     mock_release_control,
+    mock_set_simulation,
     mock_set_target_power,
     mock_structured_pause,
     mock_structured_resume,
@@ -142,6 +143,31 @@ async def test_mock_structured_pause_publishes_paused_envelope() -> None:
     # Mock's ERG target should reflect the easy-spin.
     w, _r, _b = await state.snapshot()
     assert w == 75
+
+
+async def test_mock_set_simulation_publishes_accepted_envelope() -> None:
+    """Mock mode equivalent of FtmsControl.set_simulation. Always accepts —
+    mock has no physics behind it; the envelope is the observable. Useful
+    for engine/client dev of SIM-mode UI without hardware. Acceptance
+    criterion from the brief: 'Mock mode logs/broadcasts accepted
+    simulation params.'"""
+    from roguerglike_sidecar.events import SimulationSetData
+
+    bus = EventBus()
+    async with bus.subscribe() as q:
+        await mock_set_simulation(
+            bus,
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "simulation_set"
+    assert isinstance(env.data, SimulationSetData)
+    assert env.data.accepted is True
+    assert env.data.grade_percent == 4.5
 
 
 async def test_mock_structured_resume_publishes_resumed_envelope() -> None:
