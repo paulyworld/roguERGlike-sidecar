@@ -30,7 +30,13 @@ import logging
 import struct
 from typing import TYPE_CHECKING
 
-from ..events import ControlAcquiredData, ControlReleasedData, DeviceKind, TargetPowerSetData
+from ..events import (
+    ControlAcquiredData,
+    ControlReleasedData,
+    DeviceKind,
+    SimulationSetData,
+    TargetPowerSetData,
+)
 from ..ws_server import EventBus
 
 if TYPE_CHECKING:
@@ -46,6 +52,7 @@ OP_RESET = 0x01
 OP_SET_TARGET_POWER = 0x05
 OP_START = 0x07
 OP_STOP = 0x08
+OP_SET_INDOOR_BIKE_SIM = 0x11
 
 # Indication shape: [0x80, request_op_code, result_code, ...params].
 RESPONSE_OPCODE = 0x80
@@ -206,6 +213,88 @@ class FtmsControl:
             clamped, accepted=True, reason="restored" if _restoring else ""
         )
 
+    async def set_simulation(
+        self,
+        *,
+        grade_percent: float,
+        wind_speed_mps: float,
+        rolling_resistance: float,
+        wind_resistance: float,
+    ) -> None:
+        """Write Set Indoor Bike Simulation Parameters (FTMS opcode 0x11).
+
+        Encodes the four fields per the FTMS spec wire format and publishes
+        a ``simulation_set`` ack envelope on success or a typed rejection
+        on failure (no control claimed, trainer rejected, BLE error,
+        indication timeout). Pre-condition: control claimed."""
+        if not self._is_controlling:
+            await self._publish_simulation_set(
+                grade_percent=grade_percent,
+                wind_speed_mps=wind_speed_mps,
+                rolling_resistance=rolling_resistance,
+                wind_resistance=wind_resistance,
+                accepted=False,
+                reason="not controlling",
+            )
+            return
+
+        # FTMS wire encoding per §4.16.2.13:
+        #   - wind_speed: sint16 LE, 0.001 m/s resolution
+        #   - grade: sint16 LE, 0.01 % resolution
+        #   - crr: uint8, 0.0001 resolution
+        #   - cw: uint8, 0.01 kg/m resolution
+        payload = struct.pack(
+            "<hhBB",
+            int(round(wind_speed_mps * 1000)),
+            int(round(grade_percent * 100)),
+            int(round(rolling_resistance * 10000)),
+            int(round(wind_resistance * 100)),
+        )
+        try:
+            result = await self._send_opcode(OP_SET_INDOOR_BIKE_SIM, payload)
+        except TimeoutError:
+            await self._publish_simulation_set(
+                grade_percent=grade_percent,
+                wind_speed_mps=wind_speed_mps,
+                rolling_resistance=rolling_resistance,
+                wind_resistance=wind_resistance,
+                accepted=False,
+                reason="indication timeout",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — surface as a typed event
+            await self._publish_simulation_set(
+                grade_percent=grade_percent,
+                wind_speed_mps=wind_speed_mps,
+                rolling_resistance=rolling_resistance,
+                wind_resistance=wind_resistance,
+                accepted=False,
+                reason=f"ble error: {exc}",
+            )
+            return
+        if result != RESULT_SUCCESS:
+            # FTMS spec: result 0x05 ("Op Code Not Supported") is the
+            # canonical rejection for trainers that don't implement SIM
+            # mode, even when the Feature characteristic claims they do.
+            # Surface the raw code so debugging real-trainer quirks
+            # doesn't require a re-instrumented log.
+            await self._publish_simulation_set(
+                grade_percent=grade_percent,
+                wind_speed_mps=wind_speed_mps,
+                rolling_resistance=rolling_resistance,
+                wind_resistance=wind_resistance,
+                accepted=False,
+                reason=f"trainer rejected (0x{result:02x})",
+            )
+            return
+        await self._publish_simulation_set(
+            grade_percent=grade_percent,
+            wind_speed_mps=wind_speed_mps,
+            rolling_resistance=rolling_resistance,
+            wind_resistance=wind_resistance,
+            accepted=True,
+        )
+
     async def stop(self) -> None:
         """Issue Stop (best-effort) and release controlling state."""
         if not self._is_controlling:
@@ -255,5 +344,28 @@ class FtmsControl:
         await self._bus.publish(
             type_="target_power_set",
             data=TargetPowerSetData(watts=watts, accepted=accepted, reason=reason),
+            device_kind=self._device_kind,
+        )
+
+    async def _publish_simulation_set(
+        self,
+        *,
+        grade_percent: float,
+        wind_speed_mps: float,
+        rolling_resistance: float,
+        wind_resistance: float,
+        accepted: bool,
+        reason: str = "",
+    ) -> None:
+        await self._bus.publish(
+            type_="simulation_set",
+            data=SimulationSetData(
+                grade_percent=grade_percent,
+                wind_speed_mps=wind_speed_mps,
+                rolling_resistance=rolling_resistance,
+                wind_resistance=wind_resistance,
+                accepted=accepted,
+                reason=reason,
+            ),
             device_kind=self._device_kind,
         )

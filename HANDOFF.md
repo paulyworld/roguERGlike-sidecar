@@ -4,8 +4,12 @@
 
 **Last updated:** 2026-05-24
 **Last session log:** `../../docs/sessions/2026-05-23-rebrand-and-annotations-end-to-end.md` (in umbrella)
-**Current branch:** `feat/distance-and-export`
-**Current focus:** Codex's sequence item #4 — distance deriver + FIT export. FTMS Indoor Bike Data's `meters_total` field now flows through as `distance` events with `source="trainer"`; `BleSource` tracks per-connection state to compute real `meters_delta`. New `elevation` event type for client-supplied synthetic terrain samples (no sidecar producer yet). New `roguerglike-export fit <jsonl> <fit>` CLI converts recordings to Strava/TrainingPeaks-uploadable FIT activity files (`sport=CYCLING, sub_sport=INDOOR_CYCLING`). `distance` + `activity_export` features advertised in `hello`.
+**Current branch:** `feat/sim-mode`
+**Current focus:** Codex's sequence item #5 — FTMS SIM mode (`set_simulation` command, FTMS opcode `0x11`). Sidecar can now write Indoor Bike Simulation Parameters (grade, wind, rolling resistance, aerodynamic drag) to compatible trainers. `simulation_set` ack mirrors `target_power_set` rejection pattern. `indoor_bike_simulation` advertised in `hello` features. Mock mode and live mode both wired with identical envelope shape so SIM-mode UI can be built off-bike.
+
+## ⚠️ Return-to: Strava / TrainingPeaks upload verification
+
+The FIT export (item #4) is **code-complete and live-validated against the parser**, but the acceptance criterion "manual FIT upload works in Strava / manual FIT upload works in TrainingPeaks" needs the rider to actually upload one to each platform. **A real ride's FIT lives at `docs/recordings/20260523_121056.jsonl` → run `roguerglike-export fit <that> ride.fit` → drag the .fit into Strava and TrainingPeaks. Report back any errors.** Until that's done, leave this note in HANDOFF.
 
 ## Where we are
 

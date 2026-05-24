@@ -21,12 +21,13 @@ import pytest
 from roguerglike_sidecar.ble.ftms_control import (
     CONTROL_POINT_CHAR_UUID,
     OP_REQUEST_CONTROL,
+    OP_SET_INDOOR_BIKE_SIM,
     OP_SET_TARGET_POWER,
     OP_START,
     OP_STOP,
     FtmsControl,
 )
-from roguerglike_sidecar.events import TargetPowerSetData
+from roguerglike_sidecar.events import SimulationSetData, TargetPowerSetData
 from roguerglike_sidecar.ws_server import EventBus
 
 
@@ -363,3 +364,111 @@ async def test_indication_with_wrong_response_opcode_is_ignored() -> None:
             await ctrl._send_opcode(OP_REQUEST_CONTROL)  # noqa: SLF001
         finally:
             mod.INDICATION_TIMEOUT_S = original
+
+
+# --- SIM mode (Set Indoor Bike Simulation Parameters, opcode 0x11) ---------
+
+
+async def test_set_simulation_writes_ftms_payload_and_publishes_accepted() -> None:
+    """FTMS wire format per spec §4.16.2.13:
+    [opcode 0x11][wind_speed sint16 LE 0.001 m/s][grade sint16 LE 0.01 %]
+    [crr uint8 0.0001][cw uint8 0.01 kg/m]. Total 7 bytes on the wire."""
+    bus = EventBus()
+    client = _MockClient()
+    ctrl = _make(client, bus)
+    await ctrl.attach()
+    await ctrl.request_control_and_start()
+
+    async with bus.subscribe() as q:
+        await ctrl.set_simulation(
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+        )
+        env = await _next_of_type(q, "simulation_set")
+
+    assert isinstance(env.data, SimulationSetData)
+    assert env.data.accepted is True
+    assert env.data.grade_percent == 4.5
+    # Wire format: 0x11 + struct.pack("<hhBB", 0, 450, 40, 51)
+    # wind=0*1000=0, grade=4.5*100=450, crr=0.004*10000=40, cw=0.51*100=51
+    expected = bytes([OP_SET_INDOOR_BIKE_SIM]) + struct.pack("<hhBB", 0, 450, 40, 51)
+    assert client.writes[-1] == expected
+
+
+async def test_set_simulation_negative_grade_and_headwind() -> None:
+    """Negative grade (descent) and positive wind (headwind) encode as signed
+    int16. Verifies the wire format handles the full FTMS range correctly."""
+    bus = EventBus()
+    client = _MockClient()
+    ctrl = _make(client, bus)
+    await ctrl.attach()
+    await ctrl.request_control_and_start()
+
+    async with bus.subscribe() as q:
+        await ctrl.set_simulation(
+            grade_percent=-2.0,
+            wind_speed_mps=3.5,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+        )
+        await _next_of_type(q, "simulation_set")
+
+    # wind=3.5*1000=3500, grade=-2.0*100=-200, crr=40, cw=51
+    expected = bytes([OP_SET_INDOOR_BIKE_SIM]) + struct.pack("<hhBB", 3500, -200, 40, 51)
+    assert client.writes[-1] == expected
+
+
+async def test_set_simulation_without_control_publishes_rejection() -> None:
+    """Pre-condition for FTMS write: sidecar must hold the Control Point.
+    Skipping the request_control_and_start step → simulation_set
+    accepted=False reason='not controlling'."""
+    bus = EventBus()
+    client = _MockClient()
+    ctrl = _make(client, bus)
+    await ctrl.attach()
+    # NOTE: NOT calling request_control_and_start
+
+    async with bus.subscribe() as q:
+        await ctrl.set_simulation(
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+        )
+        env = await _next_of_type(q, "simulation_set")
+
+    assert isinstance(env.data, SimulationSetData)
+    assert env.data.accepted is False
+    assert env.data.reason == "not controlling"
+    # No SIM opcode should have hit the wire — only Request Control had been
+    # set up, and we skipped even that.
+    assert not any(w[0] == OP_SET_INDOOR_BIKE_SIM for w in client.writes)
+
+
+async def test_set_simulation_trainer_rejection_surfaces_result_code() -> None:
+    """Trainers that don't actually support SIM despite advertising it (rare
+    but observed in some firmware) return a non-success result code. The
+    rejection envelope carries the raw code so debugging quirks doesn't
+    require re-instrumenting logs."""
+    bus = EventBus()
+    # Pre-load a rejection result for OP_SET_INDOOR_BIKE_SIM: 0x05 = "Op
+    # Code Not Supported".
+    client = _MockClient(result_overrides={OP_SET_INDOOR_BIKE_SIM: 0x05})
+    ctrl = _make(client, bus)
+    await ctrl.attach()
+    await ctrl.request_control_and_start()
+
+    async with bus.subscribe() as q:
+        await ctrl.set_simulation(
+            grade_percent=4.5,
+            wind_speed_mps=0.0,
+            rolling_resistance=0.004,
+            wind_resistance=0.51,
+        )
+        env = await _next_of_type(q, "simulation_set")
+
+    assert isinstance(env.data, SimulationSetData)
+    assert env.data.accepted is False
+    assert "0x05" in env.data.reason

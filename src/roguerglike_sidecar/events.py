@@ -206,6 +206,34 @@ class PausedData(_StrictModel):
     previous_target_watts: int
 
 
+class SimulationSetData(_StrictModel):
+    """Ack of a ``set_simulation`` command (FTMS Set Indoor Bike Simulation
+    Parameters, opcode ``0x11``). Mirrors the ``target_power_set`` pattern —
+    ``accepted=False`` with a ``reason`` string when rejected.
+
+    Common rejection reasons:
+
+    - ``"not controlling"`` — sidecar hasn't claimed the Control Point yet
+    - ``"device does not support indoor bike simulation"`` — trainer's
+      Feature characteristic doesn't advertise SIM support
+    - ``"trainer rejected (0xNN)"`` — Control Point indication returned a
+      non-success result code
+    - ``"indication timeout"`` / ``"ble error: ..."`` — wire-layer failure
+
+    Echoed fields reflect the values that were sent to the trainer (or
+    that would have been, on rejection). Sidecar does not clamp to
+    arbitrary "safe" ranges — the schema's Field bounds match the FTMS
+    spec's encodable range, and the trainer enforces its own physical
+    limits."""
+
+    grade_percent: float
+    wind_speed_mps: float
+    rolling_resistance: float
+    wind_resistance: float
+    accepted: bool
+    reason: str = ""
+
+
 class ResumedData(_StrictModel):
     """Structured (client-driven) resume completed. The trainer has
     ramped back to ``restored_to_watts`` over ``ramped_over_s`` seconds.
@@ -297,6 +325,7 @@ EventType = Literal[
     "control_acquired",
     "control_released",
     "target_power_set",
+    "simulation_set",
     "cadence_bailout_engaged",
     "cadence_bailout_disengaged",
     "paused",
@@ -320,6 +349,7 @@ EventData = (
     | ControlAcquiredData
     | ControlReleasedData
     | TargetPowerSetData
+    | SimulationSetData
     | CadenceBailoutEngagedData
     | CadenceBailoutDisengagedData
     | PausedData
@@ -350,6 +380,7 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "control_acquired": ControlAcquiredData,
     "control_released": ControlReleasedData,
     "target_power_set": TargetPowerSetData,
+    "simulation_set": SimulationSetData,
     "cadence_bailout_engaged": CadenceBailoutEngagedData,
     "cadence_bailout_disengaged": CadenceBailoutDisengagedData,
     "paused": PausedData,
@@ -507,6 +538,48 @@ class ResumeCommand(BaseModel):
     type: Literal["resume"]
 
 
+class SetSimulationCommand(BaseModel):
+    """FTMS Set Indoor Bike Simulation Parameters (opcode ``0x11``).
+
+    Used by SIM Terrain mode in gizzERG and future route-replay modes.
+    Trainer adjusts its physics model so resistance corresponds to riding
+    up/down the given grade with the given headwind / rolling resistance /
+    aerodynamic drag. The rider controls power by gear + cadence, like
+    outdoor riding — the inverse mental model from ERG.
+
+    Field bounds match the FTMS spec's encodable range; the trainer
+    enforces its own physical limits beyond that. Defaults match the
+    Zwift / TrainerRoad / Wahoo convention for "typical road bike" so a
+    command with only ``grade_percent`` set is a sensible road-feel
+    simulation.
+
+    Gated on:
+    - sidecar feature ``indoor_bike_simulation`` (in the ``hello``
+      envelope's features list)
+    - device capability ``device_capabilities.indoor_bike_simulation``
+    - sidecar startup with ``--allow-trainer-control``
+
+    The sidecar will accept the command on any controllable trainer but
+    publishes ``simulation_set accepted=false reason="..."`` if the
+    trainer doesn't support SIM, the command times out, or BLE errors."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["set_simulation"]
+    # int16 LE, 0.01% resolution. Spec range ±327.67%, capped here at the
+    # physically plausible ±100% (a 100% grade is a vertical wall; no
+    # real ride needs more, and clients sending garbage values get rejected
+    # at the parse boundary rather than the trainer.)
+    grade_percent: float = Field(ge=-100.0, le=100.0)
+    # int16 LE, 0.001 m/s resolution. Spec range ±32.767 m/s ≈ ±73 mph.
+    wind_speed_mps: float = Field(default=0.0, ge=-32.0, le=32.0)
+    # uint8, 0.0001 unitless resolution. Spec range [0, 0.0255]. 0.004 is
+    # the typical road-tire convention used by Zwift and TrainerRoad.
+    rolling_resistance: float = Field(default=0.004, ge=0.0, le=0.0255)
+    # uint8, 0.01 kg/m resolution. Spec range [0, 2.55]. 0.51 is the
+    # typical road bike + hoods position used by Zwift and TrainerRoad.
+    wind_resistance: float = Field(default=0.51, ge=0.0, le=2.55)
+
+
 Command = Annotated[
     SetTargetPowerCommand
     | StartCommand
@@ -514,7 +587,8 @@ Command = Annotated[
     | ReleaseControlCommand
     | AnnotateCommand
     | PauseCommand
-    | ResumeCommand,
+    | ResumeCommand
+    | SetSimulationCommand,
     Field(discriminator="type"),
 ]
 
@@ -527,6 +601,7 @@ ParsedCommand = (
     | AnnotateCommand
     | PauseCommand
     | ResumeCommand
+    | SetSimulationCommand
 )
 
 
