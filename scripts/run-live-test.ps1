@@ -5,6 +5,8 @@
 #   ./scripts/run-live-test.ps1 -RiderFtp 275
 #   ./scripts/run-live-test.ps1 -Bike "KICKR" -Hr "TICKR"
 #   ./scripts/run-live-test.ps1 -Mock          # off-bike dev path
+#   ./scripts/run-live-test.ps1 -Record        # capture JSONL to docs/recordings/
+#   ./scripts/run-live-test.ps1 -RecordPath rides/test.jsonl
 #
 # Why a script and not a pasted one-liner: PowerShell backtick line
 # continuation is whitespace-sensitive and breaks on terminal/clipboard
@@ -20,7 +22,12 @@ param(
     [int]$DisconnectBailoutS = 10,
     [switch]$Mock,
     [switch]$NoTrainerControl,
-    [switch]$PreferBikeHr
+    [switch]$PreferBikeHr,
+    # -Record               → auto-timestamped path under docs/recordings/
+    # -RecordPath <path>    → explicit path (overrides auto)
+    # (omit both)           → no recording
+    [switch]$Record,
+    [string]$RecordPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +62,15 @@ if (-not $NoTrainerControl) {
 }
 
 if ($PreferBikeHr) { $cliArgs += @("--prefer-bike-hr") }
+
+if ($Record -or $RecordPath) {
+    if (-not $RecordPath) {
+        $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $RecordPath = Join-Path -Path "docs" -ChildPath "recordings/$stamp.jsonl"
+    }
+    $cliArgs += @("--record", $RecordPath)
+    Write-Host "Recording to $RecordPath" -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "Launching sidecar:" -ForegroundColor Cyan

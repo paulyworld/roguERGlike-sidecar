@@ -7,6 +7,7 @@ import contextlib
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -37,6 +38,7 @@ from .mock import (
     mock_set_target_power,
     run_mock_loop,
 )
+from .recording import run_recorder
 from .session import announce_session_start
 from .web_ui import DEFAULT_PORT as UI_PORT
 from .web_ui import run_web_ui
@@ -101,6 +103,7 @@ async def _run_mock(
     ui_port: int,
     *,
     allow_trainer_control: bool,
+    record_path: Path | None,
 ) -> None:
     bus = EventBus()
     state = MockState()
@@ -123,11 +126,20 @@ async def _run_mock(
         run_ws_server(bus, port=ws_port, on_command=handler),
         run_web_ui(state, port=ui_port),
     ):
-        if allow_trainer_control:
-            # Mock auto-acquires (live mode does the same right after connect)
-            # so the engine sees control_acquired without having to issue Start.
-            await mock_acquire_control(bus)
-        await run_mock_loop(bus, state)
+        recorder_task: asyncio.Task[None] | None = None
+        if record_path is not None:
+            recorder_task = asyncio.create_task(run_recorder(bus, record_path))
+        try:
+            if allow_trainer_control:
+                # Mock auto-acquires (live mode does the same right after connect)
+                # so the engine sees control_acquired without having to issue Start.
+                await mock_acquire_control(bus)
+            await run_mock_loop(bus, state)
+        finally:
+            if recorder_task is not None:
+                recorder_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await recorder_task
 
 
 DEFAULT_SCAN_TIMEOUT_S = 30.0
@@ -254,6 +266,7 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     target_power_ramp_s: float,
     rider_ftp: int | None,
     scan_timeout_s: float,
+    record_path: Path | None,
 ) -> None:
     bus = EventBus()
     bike_profile = FtmsBikeProfile()
@@ -370,6 +383,8 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     async with run_ws_server(bus, port=ws_port, on_command=handler):
         await announce_session_start(bus, primary_kind)
         tasks = [asyncio.create_task(s.run()) for s in sources]
+        if record_path is not None:
+            tasks.append(asyncio.create_task(run_recorder(bus, record_path)))
         if allow_trainer_control:
             tasks.append(
                 asyncio.create_task(_disconnect_bailout_watcher(bus, sources, disconnect_bailout_s))
@@ -570,6 +585,18 @@ async def _run_scan() -> None:
         "Whoop broadcast without having to re-launch the command."
     ),
 )
+@click.option(
+    "--record",
+    "record_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Write every published envelope to this JSONL file (one JSON object "
+        "per line, flushed per write). Includes the session-state replay so "
+        "the recording is self-contained. The file WILL contain personal "
+        "telemetry (HR, power, cadence) — keep it out of git."
+    ),
+)
 @click.option("--ws-port", type=int, default=WS_PORT, show_default=True)
 @click.option("--ui-port", type=int, default=UI_PORT, show_default=True)
 def main(  # noqa: PLR0913 — CLI fan-in
@@ -586,6 +613,7 @@ def main(  # noqa: PLR0913 — CLI fan-in
     target_power_ramp_s: float,
     rider_ftp: int | None,
     scan_timeout_s: float,
+    record_path: Path | None,
     ws_port: int,
     ui_port: int,
 ) -> None:
@@ -607,6 +635,7 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     ws_port,
                     ui_port,
                     allow_trainer_control=allow_trainer_control,
+                    record_path=record_path,
                 )
             )
         return
@@ -633,6 +662,7 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     target_power_ramp_s=target_power_ramp_s,
                     rider_ftp=rider_ftp,
                     scan_timeout_s=scan_timeout_s,
+                    record_path=record_path,
                 )
             )
         return
