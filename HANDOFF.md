@@ -2,10 +2,10 @@
 
 > Current state of this repo. Updated at the end of every session that touches it. Read first.
 
-**Last updated:** 2026-05-24 (early)
+**Last updated:** 2026-05-24
 **Last session log:** `../../docs/sessions/2026-05-23-rebrand-and-annotations-end-to-end.md` (in umbrella)
-**Current branch:** `feat/structured-pause`
-**Current focus:** Codex's sequence item #3 — Pattern B structured pause. New `pause` / `resume` commands + `paused` / `resumed` envelopes. CadenceBailout grows a second state machine (`_structured_paused`) alongside the existing cadence-pause; the two coexist correctly (structured pause suspends bailout watching, cadence return doesn't auto-resume structured pause, `set_target_power` during structured pause queues with `reason="deferred-paused"`). `structured_pause` feature advertised in `hello`.
+**Current branch:** `feat/distance-and-export`
+**Current focus:** Codex's sequence item #4 — distance deriver + FIT export. FTMS Indoor Bike Data's `meters_total` field now flows through as `distance` events with `source="trainer"`; `BleSource` tracks per-connection state to compute real `meters_delta`. New `elevation` event type for client-supplied synthetic terrain samples (no sidecar producer yet). New `roguerglike-export fit <jsonl> <fit>` CLI converts recordings to Strava/TrainingPeaks-uploadable FIT activity files (`sport=CYCLING, sub_sport=INDOOR_CYCLING`). `distance` + `activity_export` features advertised in `hello`.
 
 ## Where we are
 

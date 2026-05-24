@@ -49,18 +49,22 @@ def test_full_bike_packet_with_speed_cadence_power_hr() -> None:
     ]
 
 
-def test_unsupported_fields_are_skipped_not_misaligned() -> None:
+def test_decoder_extracts_distance_with_trainer_source() -> None:
     # flags=0x0054: speed (bit 0 clear), cadence (bit 2), distance (bit 4),
-    # power (bit 6). The decoder doesn't emit a distance event yet but must
-    # still step over its 3 bytes so the power field decodes correctly.
+    # power (bit 6). All four fields are decoded; distance emits with
+    # meters_delta=0 (the per-connection BleSource computes the real delta
+    # against its tracked last_total before publishing).
     # speed 30.0 -> 3000 -> b'\xb8\x0b'
     # cadence 90 -> 180 -> b'\xb4\x00'
     # distance 12500 m -> b'\xd4\x30\x00' (u24 LE)
     # power 200 -> b'\xc8\x00'
+    from roguerglike_sidecar.events import DistanceData
+
     events = _decode(b"\x54\x00\xb8\x0b\xb4\x00\xd4\x30\x00\xc8\x00")
     assert events == [
         ("speed", SpeedData(kph=30.0)),
         ("cadence", CadenceData(rpm=90)),
+        ("distance", DistanceData(meters_total=12500.0, meters_delta=0.0, source="trainer")),
         ("power", PowerData(watts=200)),
     ]
 
