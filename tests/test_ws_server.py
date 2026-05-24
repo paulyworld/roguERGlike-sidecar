@@ -348,6 +348,66 @@ async def test_inbound_annotate_works_without_trainer_control_handler() -> None:
     assert env.data.tag == "marker"
 
 
+async def test_hello_envelope_replays_to_late_subscribers() -> None:
+    """``hello`` is the sidecar self-describe; clients connecting any time
+    during a session must learn the protocol version + feature list. Test
+    confirms it lands via the session-state replay path."""
+    from roguerglike_sidecar.events import HelloData
+    from roguerglike_sidecar.session import announce_hello
+
+    bus = EventBus()
+    await announce_hello(bus, mode="mock", features=["set_target_power", "annotations"])
+    # Other session-state events fire after hello in normal startup; confirm
+    # hello still replays in its own seq slot regardless.
+    await bus.publish(
+        type_="device_connected",
+        data=DeviceConnectedData(kind="bike_trainer", name="KICKR"),
+        device_kind="mock",
+    )
+
+    async with bus.subscribe() as q:
+        first = await asyncio.wait_for(q.get(), timeout=1.0)
+        second = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    # Replayed in seq order: hello first (seq=0), device_connected second (seq=1).
+    assert first.type == "hello"
+    assert isinstance(first.data, HelloData)
+    assert first.data.mode == "mock"
+    assert "annotations" in first.data.features
+    assert first.seq == 0
+    assert second.type == "device_connected"
+    assert second.seq == 1
+
+
+async def test_announce_hello_uses_sidecar_device_kind() -> None:
+    """Hello isn't from a piece of hardware — it's the sidecar describing
+    itself. ``device_kind`` should be ``sidecar``, distinct from the
+    ``client`` kind used for rider-originated events."""
+    from roguerglike_sidecar.session import announce_hello
+
+    bus = EventBus()
+    async with bus.subscribe() as q:
+        await announce_hello(bus, mode="live", features=[])
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.device_kind == "sidecar"
+
+
+async def test_build_features_includes_baseline_capabilities() -> None:
+    """build_features advertises set_target_power even without
+    --allow-trainer-control: the command exists in the protocol; runtime
+    gating surfaces via the typed target_power_set rejection, not via
+    feature absence. Otherwise a client that connects before the operator
+    flips the flag would gate UI off and never re-enable it."""
+    from roguerglike_sidecar.session import build_features
+
+    flagged = build_features(allow_trainer_control=True)
+    unflagged = build_features(allow_trainer_control=False)
+    for feature in ("set_target_power", "recording", "annotations"):
+        assert feature in flagged
+        assert feature in unflagged
+
+
 async def test_latest_session_state_wins_on_replay() -> None:
     """If device_connected is emitted twice (e.g. reconnect), the late
     subscriber sees only the most recent."""

@@ -39,7 +39,7 @@ from .mock import (
     run_mock_loop,
 )
 from .recording import run_recorder
-from .session import announce_session_start
+from .session import announce_hello, announce_session_start, build_features
 from .web_ui import DEFAULT_PORT as UI_PORT
 from .web_ui import run_web_ui
 from .ws_server import DEFAULT_PORT as WS_PORT
@@ -130,6 +130,13 @@ async def _run_mock(
         if record_path is not None:
             recorder_task = asyncio.create_task(run_recorder(bus, record_path))
         try:
+            # hello goes first so it occupies seq=0 in every recording and
+            # is the first envelope replayed to every subscriber.
+            await announce_hello(
+                bus,
+                mode="mock",
+                features=build_features(allow_trainer_control=allow_trainer_control),
+            )
             if allow_trainer_control:
                 # Mock auto-acquires (live mode does the same right after connect)
                 # so the engine sees control_acquired without having to issue Start.
@@ -381,6 +388,13 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     handler = on_command if allow_trainer_control else None
 
     async with run_ws_server(bus, port=ws_port, on_command=handler):
+        # hello goes first so it occupies seq=0 in every recording and
+        # is the first envelope replayed to every subscriber.
+        await announce_hello(
+            bus,
+            mode="live",
+            features=build_features(allow_trainer_control=allow_trainer_control),
+        )
         await announce_session_start(bus, primary_kind)
         tasks = [asyncio.create_task(s.run()) for s in sources]
         if record_path is not None:

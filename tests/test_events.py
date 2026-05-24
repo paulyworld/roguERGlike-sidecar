@@ -17,6 +17,7 @@ from roguerglike_sidecar.events import (
     DeviceConnectedData,
     Envelope,
     HeartRateData,
+    HelloData,
     PowerData,
     ReleaseControlCommand,
     RiderAnnotationData,
@@ -299,3 +300,52 @@ def test_annotate_command_accepts_empty_context() -> None:
     cmd = parse_command_json('{"type": "annotate", "tag": "marker", "context": {}}')
     assert isinstance(cmd, AnnotateCommand)
     assert cmd.context == {}
+
+
+# --- hello envelope ------------------------------------------------------
+
+
+def test_hello_envelope_round_trip() -> None:
+    env = Envelope(
+        type="hello",
+        ts=1715500000.0,
+        session_id=uuid4(),
+        seq=0,
+        device_kind="sidecar",
+        data=HelloData(
+            protocol_version="1.0.0",
+            sidecar_version="0.1.0",
+            features=["set_target_power", "recording", "annotations"],
+            mode="live",
+        ),
+    )
+    parsed = Envelope.model_validate_json(env.to_wire())
+    assert parsed == env
+    assert isinstance(parsed.data, HelloData)
+    assert parsed.data.protocol_version == "1.0.0"
+    assert "annotations" in parsed.data.features
+
+
+def test_hello_rejects_unknown_mode() -> None:
+    """Mode is a strict literal — typos in the launcher shouldn't get past
+    construction. Tests the wire ingress path."""
+    with pytest.raises(ValidationError):
+        Envelope.model_validate_json(
+            '{"type": "hello", "ts": 1.0, '
+            '"session_id": "00000000-0000-0000-0000-000000000000", "seq": 0, '
+            '"device_kind": "sidecar", "data": {"protocol_version": "1.0.0", '
+            '"sidecar_version": "0.1.0", "features": [], "mode": "freestyle"}}'
+        )
+
+
+def test_hello_rejects_extra_fields() -> None:
+    """Strict model — adding a field without a schema bump means the client
+    sees a parse error rather than silently picking up unknown semantics."""
+    with pytest.raises(ValidationError):
+        HelloData(
+            protocol_version="1.0.0",
+            sidecar_version="0.1.0",
+            features=[],
+            mode="mock",
+            uptime_s=120.0,  # type: ignore[call-arg]
+        )

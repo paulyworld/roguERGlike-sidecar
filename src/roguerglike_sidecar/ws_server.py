@@ -61,6 +61,7 @@ DEFAULT_PORT = 8421
 # the current ERG target.
 SESSION_STATE_TYPES: frozenset[EventType] = frozenset(
     {
+        "hello",
         "session_start",
         "device_connected",
         "device_disconnected",

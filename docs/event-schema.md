@@ -125,8 +125,58 @@ Rolling 5s normalized power, emitted at 1Hz. Smoothed signal for game logic. Alw
 
 ## Session control
 
+### `hello`
+The sidecar's first envelope on every WS subscription. Self-describes the
+protocol version, sidecar build, supported features, and mode. Replayed
+to every new subscriber via the session-state mechanism — a client that
+connects mid-session learns the contract immediately on attach.
+
+```json
+{
+  "type": "hello",
+  "ts": 1779560000.0,
+  "session_id": "5d5590b6-c10e-4ed0-a3d9-1f8074caa69b",
+  "seq": 0,
+  "device_kind": "sidecar",
+  "data": {
+    "protocol_version": "1.0.0",
+    "sidecar_version": "0.1.0",
+    "features": ["set_target_power", "recording", "annotations"],
+    "mode": "live"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `protocol_version` | Semver string. Minor bumps add features backward-compatibly; major bumps are breaking changes. Clients seeing an unknown major version should surface a visible warning. |
+| `sidecar_version` | Sidecar build version (matches `roguerglike_sidecar.__version__`). Useful for bug reports; not contractual. |
+| `features` | List of stable strings declaring sidecar protocol capabilities. Add a string when a new feature ships; never rename or remove without a major bump. |
+| `mode` | `"mock"` / `"live"` / `"replay"`. Tells clients what data source is driving telemetry. |
+
+`device_kind` is `"sidecar"`: hello isn't about a piece of hardware,
+it's the sidecar describing itself. Distinct from `"client"` (used by
+`rider_annotation` for rider-originated events).
+
+**Recommended `features` vocabulary** (clients gate UI on these strings):
+
+| Feature | Means the sidecar supports... |
+|---|---|
+| `set_target_power` | The `set_target_power` command (whether or not `--allow-trainer-control` is set; runtime gating surfaces via the `target_power_set` rejection ack) |
+| `recording` | The `--record <path>` CLI flag for in-process JSONL recording |
+| `annotations` | The `annotate` command + `rider_annotation` envelope |
+| `structured_pause` | The `pause` / `resume` commands + `paused` / `resumed` envelopes *(not yet shipped)* |
+| `distance` | Derived `distance` events from FTMS `meters_total` *(not yet shipped)* |
+| `activity_export` | FIT / TCX / GPX export of completed sessions *(not yet shipped)* |
+| `indoor_bike_simulation` | FTMS Set Indoor Bike Simulation Parameters writes (grade, wind, rolling resistance) *(not yet shipped)* |
+
+A feature in this list means *the sidecar will accept and respond to
+the relevant commands*. It does **not** mean the connected hardware
+supports it — that's `device_capabilities`. Clients gate trainer-write
+UI on both: the protocol feature AND the device capability.
+
 ### `session_start` / `session_end`
-Emitted by the sidecar at boundaries.
+Emitted by the sidecar at boundaries. `session_start` follows `hello`.
 
 ### `device_connected` / `device_disconnected`
 ```json
