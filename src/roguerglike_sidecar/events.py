@@ -55,9 +55,45 @@ class SpeedData(_StrictModel):
     kph: float = Field(ge=0.0, le=120.0)
 
 
+DistanceSource = Literal["trainer", "synthetic", "gps"]
+
+
 class DistanceData(_StrictModel):
+    """Cumulative + delta distance, with a source attribution.
+
+    ``source`` distinguishes three flavors of distance that downstream
+    analyzers and exports must NOT conflate (per memory
+    ``terrain-distance-ownership``):
+
+    - ``trainer``: FTMS ``meters_total`` from the bike. Real distance,
+      no synthetic terrain — what the wheel actually turned through.
+    - ``synthetic``: computed from a client-supplied terrain profile +
+      trainer speed (ERG Terrain / SIM Terrain virtual distance).
+    - ``gps``: from a GPS / route-replay source.
+
+    Exports (FIT/TCX/GPX) must preserve the source distinction so a
+    30 km ride doesn't get confused for an outdoor route when it was
+    actually a synthetic concert ride.
+    """
+
     meters_total: float = Field(ge=0.0)
     meters_delta: float = Field(ge=0.0)
+    source: DistanceSource
+
+
+class ElevationData(_StrictModel):
+    """Cumulative elevation gain + delta, with source attribution.
+
+    Same ``trainer`` / ``synthetic`` / ``gps`` semantics as
+    :class:`DistanceData`. ``trainer`` is only populated when the
+    trainer reports elevation (rare on bike trainers; common on
+    inclining treadmills). Most rides emit ``synthetic`` (from a
+    terrain profile + grade) or omit elevation entirely.
+    """
+
+    meters_total: float = Field(ge=0.0)
+    meters_delta: float = Field(ge=0.0)
+    source: DistanceSource
 
 
 class DeviceConnectedData(_StrictModel):
@@ -254,6 +290,7 @@ EventType = Literal[
     "heart_rate",
     "speed",
     "distance",
+    "elevation",
     "device_connected",
     "device_disconnected",
     "device_capabilities",
@@ -276,6 +313,7 @@ EventData = (
     | HeartRateData
     | SpeedData
     | DistanceData
+    | ElevationData
     | DeviceConnectedData
     | DeviceDisconnectedData
     | DeviceCapabilitiesData
@@ -305,6 +343,7 @@ _DATA_BY_TYPE: dict[str, type[BaseModel]] = {
     "heart_rate": HeartRateData,
     "speed": SpeedData,
     "distance": DistanceData,
+    "elevation": ElevationData,
     "device_connected": DeviceConnectedData,
     "device_disconnected": DeviceDisconnectedData,
     "device_capabilities": DeviceCapabilitiesData,

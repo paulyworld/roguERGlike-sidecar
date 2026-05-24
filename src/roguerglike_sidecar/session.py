@@ -23,6 +23,8 @@ _BASE_FEATURES: tuple[str, ...] = (
     "recording",
     "annotations",
     "structured_pause",
+    "distance",
+    "activity_export",
 )
 
 

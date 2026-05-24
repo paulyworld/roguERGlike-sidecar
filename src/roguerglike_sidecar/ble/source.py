@@ -74,15 +74,36 @@ class BleSource:
         # Becomes non-None after a successful connect with a control factory.
         # The CLI's command handler reads this attribute.
         self.control: FtmsControl | None = None
+        # Last cumulative trainer-distance seen, used to compute meters_delta
+        # before publishing. The decoder is shared/stateless; delta tracking
+        # belongs here at the per-connection lifecycle. Reset to None on
+        # connection drop so a reconnect-with-zeroed-trainer-counter
+        # doesn't emit a negative delta.
+        self._last_distance_m: float | None = None
 
     async def on_packet(self, payload: bytes) -> None:
         """Decode one notification payload and publish each resulting event.
 
         Public so tests can drive it without standing up a real BLE client.
         """
+        from ..events import DistanceData
+
         for type_, data in self._profile.decode(payload):
             if type_ in self._drop_event_types:
                 continue
+            # Trainer distance arrives from the decoder as a cumulative
+            # reading with delta=0; compute the real delta here against
+            # the prior cumulative. First event after connect (or after a
+            # trainer counter reset) emits delta=0 to avoid spurious large
+            # jumps.
+            if type_ == "distance" and isinstance(data, DistanceData):
+                total = data.meters_total
+                if self._last_distance_m is None or total < self._last_distance_m:
+                    delta = 0.0
+                else:
+                    delta = total - self._last_distance_m
+                self._last_distance_m = total
+                data = data.model_copy(update={"meters_delta": delta})
             await self._bus.publish(
                 type_=type_,
                 data=data,

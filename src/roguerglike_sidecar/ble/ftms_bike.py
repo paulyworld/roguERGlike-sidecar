@@ -28,6 +28,7 @@ from collections.abc import Iterable
 from ..events import (
     CadenceData,
     DeviceKind,
+    DistanceData,
     EventData,
     EventType,
     HeartRateData,
@@ -123,11 +124,24 @@ class FtmsBikeProfile:
         if flags & 0x0008 and offset + 2 <= len(payload):
             offset += 2
 
-        # bit 4: total distance (u24, m). Consumed; meaningful distance events
-        # need a stateful deriver (meters_delta = total - previous_total) which
-        # belongs outside the pure decoder. Tracked as a follow-up.
+        # bit 4: total distance (u24 LE, m). Emitted as a ``distance`` event
+        # with ``source="trainer"`` and ``meters_delta=0`` — the producer
+        # (BleSource) tracks last_total to fill in the real delta before
+        # publishing, since the decoder is stateless and shared across
+        # potential reconnect cycles.
         if flags & 0x0010 and offset + 3 <= len(payload):
+            raw = payload[offset] | (payload[offset + 1] << 8) | (payload[offset + 2] << 16)
             offset += 3
+            events.append(
+                (
+                    "distance",
+                    DistanceData(
+                        meters_total=float(raw),
+                        meters_delta=0.0,
+                        source="trainer",
+                    ),
+                )
+            )
 
         # bit 5: resistance level (s16, 0.1). Consumed.
         if flags & 0x0020 and offset + 2 <= len(payload):

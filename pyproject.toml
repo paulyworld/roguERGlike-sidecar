@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 roguerglike-sidecar = "roguerglike_sidecar.cli:main"
+roguerglike-export = "roguerglike_sidecar.export.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -43,3 +44,10 @@ known-first-party = ["roguerglike_sidecar"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+# fit-tool ships without type stubs / py.typed marker. Treat its
+# imports as untyped rather than failing the type check; the wrapper
+# in `roguerglike_sidecar.export.fit` is the typed seam.
+[[tool.mypy.overrides]]
+module = ["fit_tool.*"]
+ignore_missing_imports = true

@@ -116,3 +116,85 @@ async def test_drop_event_types_default_is_empty() -> None:
         first = await asyncio.wait_for(q.get(), timeout=1.0)
         second = await asyncio.wait_for(q.get(), timeout=1.0)
     assert (first.type, second.type) == ("power", "cadence")
+
+
+# --- distance delta tracking -----------------------------------------------
+
+
+class _DistanceProfile:
+    """Emits a distance event with caller-controlled meters_total."""
+
+    name = "dist"
+    service_uuid = "00000000-0000-0000-0000-000000000000"
+    char_uuid = "00000001-0000-0000-0000-000000000000"
+    device_kind: DeviceKind = "bike_trainer"
+
+    def decode(self, payload: bytes) -> Iterable[tuple[EventType, EventData]]:
+        from roguerglike_sidecar.events import DistanceData
+
+        total = int.from_bytes(payload, "little")
+        yield (
+            "distance",
+            DistanceData(meters_total=float(total), meters_delta=0.0, source="trainer"),
+        )
+
+
+async def test_first_distance_event_emits_zero_delta() -> None:
+    """A trainer that's just connected has no prior reading; delta=0 prevents
+    a spurious huge delta on the first event (the cumulative value could be
+    in the kilometers from a prior un-cleared session)."""
+    from roguerglike_sidecar.events import DistanceData
+
+    bus = EventBus()
+    source = BleSource(_DistanceProfile(), "addr", "DistTest", bus)
+    async with bus.subscribe() as q:
+        await source.on_packet((12500).to_bytes(4, "little"))
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert env.type == "distance"
+    assert isinstance(env.data, DistanceData)
+    assert env.data.meters_total == 12500.0
+    assert env.data.meters_delta == 0.0
+    assert env.data.source == "trainer"
+
+
+async def test_subsequent_distance_events_compute_delta_from_prior() -> None:
+    """meters_delta = current_total - prior_total. Lets analyzers integrate
+    distance per-tick rather than diffing the cumulative themselves."""
+    from roguerglike_sidecar.events import DistanceData
+
+    bus = EventBus()
+    source = BleSource(_DistanceProfile(), "addr", "DeltaTest", bus)
+    async with bus.subscribe() as q:
+        await source.on_packet((12500).to_bytes(4, "little"))
+        first = await asyncio.wait_for(q.get(), timeout=1.0)
+        await source.on_packet((12515).to_bytes(4, "little"))
+        second = await asyncio.wait_for(q.get(), timeout=1.0)
+        await source.on_packet((12530).to_bytes(4, "little"))
+        third = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert isinstance(first.data, DistanceData)
+    assert isinstance(second.data, DistanceData)
+    assert isinstance(third.data, DistanceData)
+    assert first.data.meters_delta == 0.0
+    assert second.data.meters_delta == 15.0
+    assert third.data.meters_delta == 15.0
+
+
+async def test_distance_counter_reset_emits_zero_delta_not_negative() -> None:
+    """A trainer that resets its counter (rare but possible — e.g. mid-ride
+    BLE re-pair) sends a smaller cumulative than last seen. Without
+    protection, meters_delta would go negative and the schema would reject.
+    Treat any backward step as a fresh series (delta=0)."""
+    from roguerglike_sidecar.events import DistanceData
+
+    bus = EventBus()
+    source = BleSource(_DistanceProfile(), "addr", "ResetTest", bus)
+    async with bus.subscribe() as q:
+        await source.on_packet((12500).to_bytes(4, "little"))
+        await asyncio.wait_for(q.get(), timeout=1.0)
+        await source.on_packet((50).to_bytes(4, "little"))  # huge backward jump
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert isinstance(env.data, DistanceData)
+    assert env.data.meters_total == 50.0
+    assert env.data.meters_delta == 0.0  # NOT -12450

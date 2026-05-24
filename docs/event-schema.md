@@ -42,10 +42,57 @@ Mechanical power output in watts.
 ```
 
 ### `distance`
-Virtual or actual distance covered.
+Cumulative + delta distance with `source` attribution. The trainer-derived
+flavor is emitted automatically when FTMS Indoor Bike Data carries the
+total-distance field (bit 4 of the flags); the producer (`BleSource`)
+tracks the prior cumulative to compute the real `meters_delta` before
+publishing.
 ```json
-{ "type": "distance", "data": { "meters_total": 12450.3, "meters_delta": 2.1 } }
+{
+  "type": "distance",
+  "data": {
+    "meters_total": 12450.3,
+    "meters_delta": 2.1,
+    "source": "trainer"
+  }
+}
 ```
+
+`source` is one of:
+
+| Source | Meaning |
+|---|---|
+| `trainer` | FTMS `meters_total` from the bike — real distance the wheel turned through |
+| `synthetic` | Computed from a client-supplied terrain profile + trainer speed (ERG Terrain / SIM Terrain virtual distance) |
+| `gps` | GPS / route-replay source |
+
+**Do not conflate these in exports.** A 30 km ride that was a synthetic
+concert ride is materially different from a 30 km outdoor route. The
+FIT export currently includes whatever `distance` events the JSONL had;
+analyzers should preserve the source distinction when feeding back
+into platforms like Strava / TrainingPeaks. See memory
+`terrain-distance-ownership` for the long-term policy.
+
+### `elevation`
+Cumulative + delta elevation gain with `source` attribution. Same
+semantics as `distance` — `trainer` is rare (most bike trainers don't
+report elevation); `synthetic` is the common case (computed from a
+terrain profile + grade); `gps` is for route replay.
+```json
+{
+  "type": "elevation",
+  "data": {
+    "meters_total": 245.0,
+    "meters_delta": 1.2,
+    "source": "synthetic"
+  }
+}
+```
+
+No sidecar-side producer emits `elevation` today — the event type exists
+so terrain-aware clients can push their computed elevation samples into
+the recording for FIT export. Future SIM-mode work will populate this
+from FTMS Indoor Bike Simulation Parameters.
 
 ### `speed`
 ```json
@@ -166,8 +213,8 @@ it's the sidecar describing itself. Distinct from `"client"` (used by
 | `recording` | The `--record <path>` CLI flag for in-process JSONL recording |
 | `annotations` | The `annotate` command + `rider_annotation` envelope |
 | `structured_pause` | The `pause` / `resume` commands + `paused` / `resumed` envelopes |
-| `distance` | Derived `distance` events from FTMS `meters_total` *(not yet shipped)* |
-| `activity_export` | FIT / TCX / GPX export of completed sessions *(not yet shipped)* |
+| `distance` | `distance` + `elevation` events with `source` attribution (`trainer`/`synthetic`/`gps`) |
+| `activity_export` | FIT export of completed sessions via the `roguerglike-export` CLI |
 | `indoor_bike_simulation` | FTMS Set Indoor Bike Simulation Parameters writes (grade, wind, rolling resistance) *(not yet shipped)* |
 
 A feature in this list means *the sidecar will accept and respond to
