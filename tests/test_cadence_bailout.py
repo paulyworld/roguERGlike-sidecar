@@ -42,6 +42,8 @@ from roguerglike_sidecar.events import (
     CadenceBailoutDisengagedData,
     CadenceBailoutEngagedData,
     Envelope,
+    PausedData,
+    ResumedData,
     TargetPowerSetData,
 )
 from roguerglike_sidecar.ws_server import EventBus
@@ -462,6 +464,222 @@ async def test_first_meaningful_target_after_long_idle_doesnt_immediately_engage
 
 
 # --- silent-rejection fix (ws_server) -------------------------------------
+
+
+# --- structured pause (Pattern B) ------------------------------------------
+
+
+async def test_structured_pause_publishes_paused_and_writes_easy_spin() -> None:
+    """structured_pause() captures previous target, writes the easy-spin
+    wattage, and publishes a ``paused`` envelope with reason + both targets."""
+    ctrl, client, bus = await _make_control()
+    await ctrl.set_target_power(250)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=3.0,
+    )
+
+    async with bus.subscribe() as q:
+        transitioned = await bailout.structured_pause(easy_spin_watts=75, reason="between-rounds")
+        env = await _drain_until(q, "paused")
+
+    assert transitioned is True
+    assert bailout.is_paused
+    assert bailout.is_structured_paused
+    assert bailout.pre_pause_target_watts == 250
+    assert isinstance(env.data, PausedData)
+    assert env.data.reason == "between-rounds"
+    assert env.data.target_watts == 75
+    assert env.data.previous_target_watts == 250
+    # Last write should be the easy-spin value.
+    assert _set_target_writes(client)[-1] == 75
+
+
+async def test_structured_resume_ramps_back_and_publishes_resumed() -> None:
+    """structured_resume() clears the pause and rams back to pre-pause."""
+    ctrl, client, bus = await _make_control()
+    await ctrl.set_target_power(200)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=0.0,  # zero-ramp for deterministic test
+    )
+
+    async with bus.subscribe() as q:
+        await bailout.structured_pause(easy_spin_watts=50, reason="break")
+        await _drain_until(q, "paused")
+        transitioned = await bailout.structured_resume()
+        # Wait for the ramp task to publish resumed
+        env = await _drain_until(q, "resumed", timeout_s=2.0)
+
+    assert transitioned is True
+    assert not bailout.is_paused
+    assert not bailout.is_structured_paused
+    assert isinstance(env.data, ResumedData)
+    assert env.data.restored_to_watts == 200
+    # Final write should be the restored target.
+    assert _set_target_writes(client)[-1] == 200
+
+
+async def test_set_target_power_during_structured_pause_is_deferred() -> None:
+    """Acceptance criterion from the brief: set_target_power during
+    structured pause is deferred (not written), surfaces a typed rejection
+    with reason='deferred-paused', and updates the resume target so the
+    eventual ramp restores to the new value (not the original pre-pause)."""
+    ctrl, client, bus = await _make_control()
+    await ctrl.set_target_power(200)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=0.0,
+    )
+
+    async with bus.subscribe() as q:
+        await bailout.structured_pause(easy_spin_watts=50, reason="break")
+        await _drain_until(q, "paused")
+        # Engine bumps the target mid-pause (e.g. next workout phase loaded).
+        await bailout.handle_set_target_power(300)
+        ack = await _drain_until(q, "target_power_set")
+
+    assert isinstance(ack.data, TargetPowerSetData)
+    assert ack.data.accepted is False
+    assert ack.data.reason == "deferred-paused"
+    assert ack.data.watts == 300
+    assert bailout.pre_pause_target_watts == 300
+    # And the trainer did NOT see a write to 300W during the pause.
+    writes = _set_target_writes(client)
+    assert 300 not in writes
+
+
+async def test_cadence_watcher_does_not_engage_during_structured_pause() -> None:
+    """Acceptance criterion from the brief: 'cadence bailout timing should
+    be suspended' while structured-paused. This test forces the watcher to
+    tick under conditions that would normally engage the bailout (long
+    idle, target above floor) and confirms it skips."""
+    ctrl, _client, bus = await _make_control(min_w=0)
+    await ctrl.set_target_power(250)
+
+    # Tiny bailout window so the watcher would fire fast if it weren't
+    # suspended. Structured pause sets the trainer target to 75W (above
+    # floor=0) so the "nothing to bail out from" early-exit doesn't apply.
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=0.01,
+        static_ramp_s=0.0,
+    )
+
+    await bailout.structured_pause(easy_spin_watts=75, reason="long-break")
+    # Backdate last-active so the watcher would normally engage immediately.
+    bailout._last_active_ts = time.monotonic() - 60.0  # noqa: SLF001
+    # Run the watcher briefly. If it weren't suspended it would call
+    # _engage_pause and publish cadence_bailout_engaged.
+    watcher_task = asyncio.create_task(bailout._watcher_loop())  # noqa: SLF001
+    try:
+        await asyncio.sleep(1.5)  # well past 0.01s window + WATCHER_TICK_S
+    finally:
+        watcher_task.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await watcher_task
+
+    # Bailout must NOT have engaged on top of structured pause.
+    assert bailout.is_structured_paused
+    assert bailout.pre_pause_target_watts == 250  # unchanged from the bailout's perspective
+
+
+async def test_cadence_return_does_not_auto_resume_structured_pause() -> None:
+    """When structured-paused, the rider pedalling back at the bike does NOT
+    initiate the resume ramp — only the ``resume`` command does. Otherwise
+    the contract is broken: a client says 'we're paused' but the rider
+    moves a crank and the bailout's auto-resume yanks them back to full
+    target."""
+    ctrl, _client, bus = await _make_control()
+    await ctrl.set_target_power(200)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=0.0,
+    )
+
+    await bailout.structured_pause(easy_spin_watts=50, reason="break")
+
+    # Simulate rider pedalling back. _on_cadence would auto-resume if this
+    # were a cadence-pause; under structured pause it must not.
+    await bailout._on_cadence(80)  # noqa: SLF001 — direct exercise
+
+    assert bailout.is_structured_paused  # still paused
+    assert bailout._ramp_task is None or bailout._ramp_task.done() is False  # noqa: SLF001
+
+
+async def test_structured_pause_is_idempotent_on_repeated_pause() -> None:
+    """Re-pause when already paused returns False (no transition), but DOES
+    update the easy-spin if a different target is supplied. No new
+    ``paused`` envelope fires — clients shouldn't see ghost re-pause events."""
+    ctrl, client, bus = await _make_control()
+    await ctrl.set_target_power(200)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=0.0,
+    )
+
+    async with bus.subscribe() as q:
+        first = await bailout.structured_pause(easy_spin_watts=75, reason="break-1")
+        await _drain_until(q, "paused")
+        second = await bailout.structured_pause(easy_spin_watts=50, reason="break-2")
+        # Brief drain attempt — no second paused envelope should fire.
+        with pytest.raises(TimeoutError):
+            await _drain_until(q, "paused", timeout_s=0.2)
+
+    assert first is True
+    assert second is False
+    # Easy-spin update did apply: last write is 50W.
+    assert _set_target_writes(client)[-1] == 50
+
+
+async def test_structured_resume_is_idempotent_when_not_paused() -> None:
+    """resume when not paused returns False — no-op, no envelope fires."""
+    ctrl, _client, bus = await _make_control()
+    await ctrl.set_target_power(200)
+
+    bailout = CadenceBailout(
+        ctrl,
+        bus,
+        device_kind="bike_trainer",
+        device_name="MockKICKR",
+        static_bailout_s=60.0,
+        static_ramp_s=0.0,
+    )
+
+    async with bus.subscribe() as q:
+        result = await bailout.structured_resume()
+        with pytest.raises(TimeoutError):
+            await _drain_until(q, "resumed", timeout_s=0.2)
+
+    assert result is False
 
 
 async def test_no_handler_set_target_power_publishes_rejection_envelope() -> None:

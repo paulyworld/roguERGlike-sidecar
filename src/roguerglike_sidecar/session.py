@@ -22,6 +22,7 @@ _BASE_FEATURES: tuple[str, ...] = (
     "set_target_power",
     "recording",
     "annotations",
+    "structured_pause",
 )
 
 

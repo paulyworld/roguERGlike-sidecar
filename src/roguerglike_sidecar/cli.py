@@ -25,7 +25,9 @@ if TYPE_CHECKING:
 from .events import (
     Command,
     EventType,
+    PauseCommand,
     ReleaseControlCommand,
+    ResumeCommand,
     SetTargetPowerCommand,
     StartCommand,
     StopCommand,
@@ -36,6 +38,8 @@ from .mock import (
     mock_acquire_control,
     mock_release_control,
     mock_set_target_power,
+    mock_structured_pause,
+    mock_structured_resume,
     run_mock_loop,
 )
 from .recording import run_recorder
@@ -62,6 +66,31 @@ DEFAULT_DISCONNECT_BAILOUT_S = 10.0
 # values are replaced by an intensity-aware curve (see CadenceBailout).
 DEFAULT_CADENCE_BAILOUT_S = 60.0
 DEFAULT_TARGET_POWER_RAMP_S = 3.0
+# Structured-pause (Pattern B) easy-spin default. Used when a client sends
+# ``pause`` without an explicit ``target_watts``. With --rider-ftp set,
+# computes as percent of FTP; without it, the static fallback applies.
+DEFAULT_PAUSE_EASY_SPIN_PCT_FTP = 0.30
+DEFAULT_PAUSE_EASY_SPIN_W = 75
+
+
+def _resolve_easy_spin_watts(
+    command_watts: int | None,
+    *,
+    rider_ftp: int | None,
+    pct_ftp: float,
+    static_w: int,
+) -> int:
+    """Pick the easy-spin wattage for a structured pause.
+
+    Precedence: explicit ``command_watts`` (from the ``pause`` payload) →
+    ``pct_ftp × rider_ftp`` if FTP is known → ``static_w`` fallback. The
+    CadenceBailout further clamps to the trainer's min/max bounds before
+    writing."""
+    if command_watts is not None:
+        return int(command_watts)
+    if rider_ftp is not None and rider_ftp > 0 and pct_ftp > 0.0:
+        return int(round(rider_ftp * pct_ftp))
+    return int(static_w)
 
 
 def _match_device(devices: list[DiscoveredDevice], query: str) -> DiscoveredDevice | None:
@@ -104,12 +133,36 @@ async def _run_mock(
     *,
     allow_trainer_control: bool,
     record_path: Path | None,
+    rider_ftp: int | None,
+    pause_easy_spin_pct_ftp: float,
+    pause_easy_spin_w: int,
 ) -> None:
     bus = EventBus()
     state = MockState()
 
+    # Mock has no CadenceBailout, so structured-pause bookkeeping lives
+    # in this closure. Mirrors the bailout's behavior: capture previous
+    # target on pause; defer set_target_power writes during pause;
+    # idempotent re-pause / re-resume.
+    mock_paused = False
+    mock_pre_pause_target: int | None = None
+
     async def on_command(command: Command) -> None:
+        nonlocal mock_paused, mock_pre_pause_target
         if isinstance(command, SetTargetPowerCommand):
+            if mock_paused:
+                # Update the deferred resume target; reject the write.
+                mock_pre_pause_target = command.watts
+                await bus.publish(
+                    type_="target_power_set",
+                    data=TargetPowerSetData(
+                        watts=command.watts,
+                        accepted=False,
+                        reason="deferred-paused",
+                    ),
+                    device_kind="mock",
+                )
+                return
             await mock_set_target_power(bus, state, command.watts)
         elif isinstance(command, StopCommand):
             await state.stop_erg()
@@ -119,6 +172,33 @@ async def _run_mock(
             await mock_release_control(bus, "requested")
         elif isinstance(command, StartCommand):
             await mock_acquire_control(bus)
+        elif isinstance(command, PauseCommand):
+            easy_spin = _resolve_easy_spin_watts(
+                command.target_watts,
+                rider_ftp=rider_ftp,
+                pct_ftp=pause_easy_spin_pct_ftp,
+                static_w=pause_easy_spin_w,
+            )
+            if mock_paused:
+                # Idempotent: update easy-spin, don't re-publish paused.
+                await state.set_erg_target_power(easy_spin)
+                return
+            mock_pre_pause_target = state.erg_target_watts or 0
+            mock_paused = True
+            await mock_structured_pause(
+                bus,
+                state,
+                easy_spin_watts=easy_spin,
+                previous_target_watts=mock_pre_pause_target,
+                reason=command.reason,
+            )
+        elif isinstance(command, ResumeCommand):
+            if not mock_paused:
+                return  # idempotent no-op
+            mock_paused = False
+            restore_to = mock_pre_pause_target if mock_pre_pause_target is not None else 0
+            mock_pre_pause_target = None
+            await mock_structured_resume(bus, state, restored_to_watts=restore_to)
 
     handler = on_command if allow_trainer_control else None
 
@@ -272,6 +352,8 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
     cadence_bailout_s: float,
     target_power_ramp_s: float,
     rider_ftp: int | None,
+    pause_easy_spin_pct_ftp: float,
+    pause_easy_spin_w: int,
     scan_timeout_s: float,
     record_path: Path | None,
 ) -> None:
@@ -383,6 +465,25 @@ async def _run_live(  # noqa: PLR0913 — CLI fan-in
                 and not bike_source.control.is_controlling
             ):
                 await bike_source.control.request_control_and_start()
+        elif isinstance(command, PauseCommand):
+            if bailout_for_bike is None:
+                log.warning("pause command received but no bailout/control is bound yet")
+                return
+            easy_spin = _resolve_easy_spin_watts(
+                command.target_watts,
+                rider_ftp=rider_ftp,
+                pct_ftp=pause_easy_spin_pct_ftp,
+                static_w=pause_easy_spin_w,
+            )
+            await bailout_for_bike.structured_pause(
+                easy_spin_watts=easy_spin,
+                reason=command.reason,
+            )
+        elif isinstance(command, ResumeCommand):
+            if bailout_for_bike is None:
+                log.warning("resume command received but no bailout/control is bound yet")
+                return
+            await bailout_for_bike.structured_resume()
 
     primary_kind = sources[0]._profile.device_kind  # noqa: SLF001 — own-package attr
     handler = on_command if allow_trainer_control else None
@@ -588,6 +689,28 @@ async def _run_scan() -> None:
     ),
 )
 @click.option(
+    "--pause-easy-spin-pct-ftp",
+    type=float,
+    default=DEFAULT_PAUSE_EASY_SPIN_PCT_FTP,
+    show_default=True,
+    help=(
+        "Easy-spin target as percent of FTP for structured pauses (Pattern B). "
+        "Used when a client sends ``pause`` without an explicit ``target_watts``. "
+        "Falls back to --pause-easy-spin-w when --rider-ftp is not set."
+    ),
+)
+@click.option(
+    "--pause-easy-spin-w",
+    type=int,
+    default=DEFAULT_PAUSE_EASY_SPIN_W,
+    show_default=True,
+    help=(
+        "Static easy-spin wattage for structured pauses when no FTP is "
+        "configured. Used only when --rider-ftp is unset and the ``pause`` "
+        "command doesn't supply ``target_watts``."
+    ),
+)
+@click.option(
     "--scan-timeout-s",
     type=float,
     default=DEFAULT_SCAN_TIMEOUT_S,
@@ -626,6 +749,8 @@ def main(  # noqa: PLR0913 — CLI fan-in
     cadence_bailout_s: float,
     target_power_ramp_s: float,
     rider_ftp: int | None,
+    pause_easy_spin_pct_ftp: float,
+    pause_easy_spin_w: int,
     scan_timeout_s: float,
     record_path: Path | None,
     ws_port: int,
@@ -650,6 +775,9 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     ui_port,
                     allow_trainer_control=allow_trainer_control,
                     record_path=record_path,
+                    rider_ftp=rider_ftp,
+                    pause_easy_spin_pct_ftp=pause_easy_spin_pct_ftp,
+                    pause_easy_spin_w=pause_easy_spin_w,
                 )
             )
         return
@@ -675,6 +803,8 @@ def main(  # noqa: PLR0913 — CLI fan-in
                     cadence_bailout_s=cadence_bailout_s,
                     target_power_ramp_s=target_power_ramp_s,
                     rider_ftp=rider_ftp,
+                    pause_easy_spin_pct_ftp=pause_easy_spin_pct_ftp,
+                    pause_easy_spin_w=pause_easy_spin_w,
                     scan_timeout_s=scan_timeout_s,
                     record_path=record_path,
                 )

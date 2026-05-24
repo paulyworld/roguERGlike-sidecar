@@ -11,6 +11,8 @@ from roguerglike_sidecar.mock import (
     mock_acquire_control,
     mock_release_control,
     mock_set_target_power,
+    mock_structured_pause,
+    mock_structured_resume,
     run_mock_loop,
 )
 from roguerglike_sidecar.ws_server import EventBus
@@ -118,3 +120,41 @@ async def test_mock_control_lifecycle_acquire_then_release() -> None:
         env = await asyncio.wait_for(q.get(), timeout=1.0)
         assert env.type == "control_released"
         assert env.data.reason == "test"  # type: ignore[union-attr]
+
+
+async def test_mock_structured_pause_publishes_paused_envelope() -> None:
+    """Acceptance criterion from the brief: mock mode can demonstrate
+    pause/resume without hardware. Tests the helper-side of that flow."""
+    bus = EventBus()
+    state = MockState()
+    await state.set_erg_target_power(220)
+
+    async with bus.subscribe() as q:
+        await mock_structured_pause(
+            bus, state, easy_spin_watts=75, previous_target_watts=220, reason="break"
+        )
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "paused"
+    assert env.data.target_watts == 75  # type: ignore[union-attr]
+    assert env.data.previous_target_watts == 220  # type: ignore[union-attr]
+    assert env.data.reason == "break"  # type: ignore[union-attr]
+    # Mock's ERG target should reflect the easy-spin.
+    w, _r, _b = await state.snapshot()
+    assert w == 75
+
+
+async def test_mock_structured_resume_publishes_resumed_envelope() -> None:
+    bus = EventBus()
+    state = MockState()
+    await state.set_erg_target_power(75)  # currently easy-spinning
+
+    async with bus.subscribe() as q:
+        await mock_structured_resume(bus, state, restored_to_watts=220)
+        env = await asyncio.wait_for(q.get(), timeout=1.0)
+
+    assert env.type == "resumed"
+    assert env.data.restored_to_watts == 220  # type: ignore[union-attr]
+    # Mock's ERG target should be restored.
+    w, _r, _b = await state.snapshot()
+    assert w == 220
