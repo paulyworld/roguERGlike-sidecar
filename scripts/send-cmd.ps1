@@ -32,22 +32,8 @@ try {
     exit 1
 }
 
-# Single-quoted here-string so PowerShell does NOT interpolate the $'s
-# inside the Python source. URL and command are passed as positional
-# sys.argv to keep shell-quoting and Python-quoting fully separated.
-$pySource = @'
-import asyncio
-import sys
-import websockets
-
-async def main():
-    url = sys.argv[1]
-    cmd = sys.argv[2]
-    async with websockets.connect(url) as ws:
-        await ws.send(cmd)
-        print("sent -> " + url + ": " + cmd)
-
-asyncio.run(main())
-'@
-
-& python -c $pySource $Url $Command
+# Delegate to a real .py file. Inlining via `python -c` is fragile on
+# Windows PowerShell because native-command argument quoting strips
+# embedded "" and word-splits multi-line scripts at spaces.
+$pyScript = Join-Path $PSScriptRoot "_send_cmd.py"
+& python $pyScript $Url $Command
