@@ -32,19 +32,22 @@ try {
     exit 1
 }
 
-# Resolve python the same way run-live-test.ps1 does — prefer the
-# installed entry point, fall back to `python -m`.
-$pythonArgs = @("-c", @"
+# Single-quoted here-string so PowerShell does NOT interpolate the $'s
+# inside the Python source. URL and command are passed as positional
+# sys.argv to keep shell-quoting and Python-quoting fully separated.
+$pySource = @'
 import asyncio
 import sys
 import websockets
 
 async def main():
-    async with websockets.connect("$Url") as ws:
-        await ws.send(r'''$Command''')
-        print(f"sent → $Url: $Command")
+    url = sys.argv[1]
+    cmd = sys.argv[2]
+    async with websockets.connect(url) as ws:
+        await ws.send(cmd)
+        print("sent -> " + url + ": " + cmd)
 
 asyncio.run(main())
-"@)
+'@
 
-& python $pythonArgs
+& python -c $pySource $Url $Command
