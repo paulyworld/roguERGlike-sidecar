@@ -146,3 +146,69 @@ def test_build_fit_skips_malformed_lines(tmp_path: Path) -> None:
         f.write("{this is not valid json\n")
 
     build_fit(jsonl, tmp_path / "mixed.fit")  # should not raise
+
+
+def test_build_fit_includes_elevation_when_present(tmp_path: Path) -> None:
+    """When the JSONL contains `elevation` events (client-pushed synthetic
+    terrain), the FIT records get `altitude` populated and the session
+    summary includes total_ascent (positive-deltas only, matching
+    Strava/TrainingPeaks convention)."""
+    jsonl = tmp_path / "terrain-ride.jsonl"
+    fit_out = tmp_path / "terrain-ride.fit"
+
+    # 60 ticks; elevation starts at 100m, climbs +1m per tick to 130m
+    # then descends back to 100m. Total ascent should be 30m; descent
+    # doesn't count toward gain. (Baseline is 100m rather than 0m
+    # because FIT serializes altitude=0 as a sentinel and the parser
+    # returns None, which is the right wire behavior but would
+    # complicate the test assertions.)
+    events: list[dict] = []
+    start_ts = 1715500000.0
+    seq = 0
+    for i in range(60):
+        ts = start_ts + i
+        events.append(
+            {
+                "type": "power",
+                "ts": ts,
+                "session_id": "00000000-0000-0000-0000-000000000000",
+                "seq": seq,
+                "device_kind": "bike_trainer",
+                "data": {"watts": 200},
+            }
+        )
+        seq += 1
+        elevation = 100.0 + float(i if i <= 30 else 60 - i)
+        events.append(
+            {
+                "type": "elevation",
+                "ts": ts,
+                "session_id": "00000000-0000-0000-0000-000000000000",
+                "seq": seq,
+                "device_kind": "client",
+                "data": {"meters_total": elevation, "meters_delta": 0.0, "source": "synthetic"},
+            }
+        )
+        seq += 1
+    _write_jsonl(jsonl, events)
+
+    build_fit(jsonl, fit_out)
+
+    parsed = FitFile.from_file(str(fit_out))
+    records = [m for m in parsed.records if isinstance(m.message, RecordMessage)]
+    sessions = [m for m in parsed.records if isinstance(m.message, SessionMessage)]
+
+    altitudes = [r.message.altitude for r in records if r.message.altitude is not None]
+    assert len(altitudes) == 60
+    assert altitudes[0] == pytest.approx(100.0)
+    assert max(altitudes) == pytest.approx(130.0)
+    # range(60) ends at i=59 → elevation = 100 + (60-59) = 101 (one tick
+    # short of returning to baseline). Doesn't matter for the property
+    # under test; the climb-then-descent shape is what matters.
+    assert altitudes[-1] == pytest.approx(101.0)
+
+    # Session summary: total_ascent = sum of positive deltas = 30m.
+    session = sessions[0].message
+    assert session.total_ascent == 30
+    assert session.max_altitude == pytest.approx(130.0)
+    assert session.min_altitude == pytest.approx(100.0)

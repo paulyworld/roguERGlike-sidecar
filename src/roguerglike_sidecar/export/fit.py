@@ -71,6 +71,10 @@ class _Sample:
     heart_rate: int | None = None
     speed_mps: float | None = None
     distance_m: float | None = None
+    # FIT's "altitude" is current elevation in meters. We persist the
+    # cumulative net-elevation reading; ride totals are computed from
+    # the elevation event's ``meters_total`` field at session end.
+    elevation_m: float | None = None
 
 
 def _read_jsonl_lines(path: Path) -> Iterable[dict[str, Any]]:
@@ -85,7 +89,7 @@ def _read_jsonl_lines(path: Path) -> Iterable[dict[str, Any]]:
                 log.warning("skipping malformed line in %s: %s", path, e)
 
 
-_TELEMETRY_TYPES = frozenset({"power", "cadence", "heart_rate", "speed", "distance"})
+_TELEMETRY_TYPES = frozenset({"power", "cadence", "heart_rate", "speed", "distance", "elevation"})
 
 
 def _bucket_to_samples(events: Iterable[dict[str, Any]]) -> list[_Sample]:
@@ -122,6 +126,8 @@ def _bucket_to_samples(events: Iterable[dict[str, Any]]) -> list[_Sample]:
             sample.speed_mps = kph / 3.6
         elif type_ == "distance":
             sample.distance_m = float(data.get("meters_total", 0.0))
+        elif type_ == "elevation":
+            sample.elevation_m = float(data.get("meters_total", 0.0))
     return [buckets[s] for s in sorted(buckets)]
 
 
@@ -140,6 +146,8 @@ def _build_records(samples: list[_Sample]) -> list[RecordMessage]:
             rec.speed = s.speed_mps
         if s.distance_m is not None:
             rec.distance = s.distance_m
+        if s.elevation_m is not None:
+            rec.altitude = s.elevation_m
         out.append(rec)
     return out
 
@@ -151,12 +159,24 @@ def _summary(samples: list[_Sample]) -> dict[str, Any]:
     hrs = [s.heart_rate for s in samples if s.heart_rate is not None]
     distances = [s.distance_m for s in samples if s.distance_m is not None]
     speeds = [s.speed_mps for s in samples if s.speed_mps is not None]
+    elevations = [s.elevation_m for s in samples if s.elevation_m is not None]
 
     def _avg(xs: list[float] | list[int]) -> float | None:
         return sum(xs) / len(xs) if xs else None
 
     def _max(xs: list[float] | list[int]) -> float | None:
         return max(xs) if xs else None
+
+    # Elevation gain = sum of positive deltas between consecutive samples.
+    # Negative deltas (descents) don't count toward gain. Matches the
+    # convention Strava / TrainingPeaks / etc. use for "elevation gain."
+    elevation_gain = 0.0
+    if elevations:
+        prev = elevations[0]
+        for cur in elevations[1:]:
+            if cur > prev:
+                elevation_gain += cur - prev
+            prev = cur
 
     return {
         "avg_power": _avg(powers),
@@ -168,6 +188,9 @@ def _summary(samples: list[_Sample]) -> dict[str, Any]:
         "avg_speed": _avg(speeds),
         "max_speed": _max(speeds),
         "total_distance": distances[-1] if distances else 0.0,
+        "total_ascent": elevation_gain if elevations else 0.0,
+        "max_altitude": _max(elevations) if elevations else None,
+        "min_altitude": min(elevations) if elevations else None,
     }
 
 
@@ -233,6 +256,8 @@ def build_fit(jsonl_path: Path, fit_path: Path) -> None:
     if summary["avg_heart_rate"] is not None:
         lap.avg_heart_rate = int(round(summary["avg_heart_rate"]))
         lap.max_heart_rate = int(round(summary["max_heart_rate"] or 0))
+    if summary["total_ascent"]:
+        lap.total_ascent = int(round(summary["total_ascent"]))
     builder.add(lap)
 
     # Session summary — sport/sub_sport are the indoor/trainer markers
@@ -255,6 +280,12 @@ def build_fit(jsonl_path: Path, fit_path: Path) -> None:
     if summary["avg_heart_rate"] is not None:
         session.avg_heart_rate = int(round(summary["avg_heart_rate"]))
         session.max_heart_rate = int(round(summary["max_heart_rate"] or 0))
+    if summary["total_ascent"]:
+        session.total_ascent = int(round(summary["total_ascent"]))
+    if summary["max_altitude"] is not None:
+        session.max_altitude = summary["max_altitude"]
+    if summary["min_altitude"] is not None:
+        session.min_altitude = summary["min_altitude"]
     session.num_laps = 1
     builder.add(session)
 
