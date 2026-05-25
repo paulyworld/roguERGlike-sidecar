@@ -1,6 +1,7 @@
 # Send a single JSON command to a running sidecar's WS server.
-# Useful for manual smoke tests of commands without client UI yet
-# (pause/resume, set_simulation, annotate, ...).
+# For one-off manual probes. For multi-step sequences (like the
+# pause/SIM smoke), use ./scripts/run-smoke-pause-sim.ps1 instead —
+# auto-paced and hands-free.
 #
 # Usage:
 #   ./scripts/send-cmd.ps1 '{"type":"pause","reason":"smoke","target_watts":50}'
@@ -10,8 +11,7 @@
 #
 # The sidecar's typed ack envelope (target_power_set, paused, resumed,
 # simulation_set, rider_annotation) will appear in the sidecar's stdout
-# and in the JSONL if -Record is active. Tail the sidecar window or the
-# recording to confirm receipt.
+# and in the JSONL if -Record is active.
 
 [CmdletBinding()]
 param(
@@ -24,7 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Validate JSON shape before sending so a typo doesn't waste a sidecar
-# round-trip (also prevents the obvious WS-frame-isn't-json failure mode).
+# round-trip.
 try {
     $null = $Command | ConvertFrom-Json
 } catch {
@@ -32,8 +32,9 @@ try {
     exit 1
 }
 
-# Delegate to a real .py file. Inlining via `python -c` is fragile on
-# Windows PowerShell because native-command argument quoting strips
-# embedded "" and word-splits multi-line scripts at spaces.
+# Pipe the command via stdin rather than passing as argv. Windows
+# PowerShell 5.1's native-command argument quoting strips embedded
+# double quotes when invoking python.exe, which corrupts JSON on the
+# wire. Stdin is a binary pipe — no shell-level munging.
 $pyScript = Join-Path $PSScriptRoot "_send_cmd.py"
-& python $pyScript $Url $Command
+$Command | & python $pyScript $Url
