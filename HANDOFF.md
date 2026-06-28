@@ -2,9 +2,10 @@
 
 > Current state of this repo. Updated at the end of every session that touches it. Read first.
 
-**Last updated:** 2026-05-24
+**Last updated:** 2026-06-27
 **Last session log:** `../../docs/sessions/2026-05-23-rebrand-and-annotations-end-to-end.md` (in umbrella)
-**Current branch:** `feat/sim-mode`
+**Current branch:** `docs/annotation-range-context`
+**2026-06-27 docs-only correction:** this branch only documents gizzERG range annotation context fields. Sidecar still treats `annotate.context` as an opaque pass-through blob; `docs/event-schema.md` now lists optional `annotation_range_start_s`, `annotation_range_end_s`, and `annotation_range_duration_s` recommended context fields used by gizzERG PR #11. No sidecar schema/model change is required.
 **Current focus:** Codex's sequence item #5 — FTMS SIM mode (`set_simulation` command, FTMS opcode `0x11`). Sidecar can now write Indoor Bike Simulation Parameters (grade, wind, rolling resistance, aerodynamic drag) to compatible trainers. `simulation_set` ack mirrors `target_power_set` rejection pattern. `indoor_bike_simulation` advertised in `hello` features. Mock mode and live mode both wired with identical envelope shape so SIM-mode UI can be built off-bike.
 
 ## ⚠️ Return-to: Strava / TrainingPeaks upload verification

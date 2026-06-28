@@ -604,6 +604,8 @@ whatever fields the client has at hand; omit the rest.
 | `speed_kph` | Virtual or trainer-reported speed |
 | `distance_m`, `elevation_gain_m` | Accumulated distance/elevation for the ride |
 | `hardware_source` | `trainer_power` / `power_meter` / `estimated_power` / `mock` |
+| `annotation_range_start_s`, `annotation_range_end_s` | Optional video/workout time span covered by the annotation. Clients use this for range annotations such as song breaks or "hold this relative intensity here." |
+| `annotation_range_duration_s` | Convenience duration for the annotation range. Derivable from start/end; included so analyzers do not have to recompute for simple summaries. |
 
 ## Client-originated events (annotations)
 
